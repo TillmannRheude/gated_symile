@@ -8,3 +8,6 @@ udm
 checkpoints
 outputs
 visualization
+debug.ipynb
+losses
+sweeps
