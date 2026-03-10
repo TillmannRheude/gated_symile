@@ -1,0 +1,27 @@
+name: MRIDataLoaderPlugin
+init: __init__
+image_extension: nii.gz
+session_id : 2
+
+sequence_types: ["CINE_segmented_LAX_4Ch"]  # CINE_segmented_LAX_2Ch, CINE_segmented_LAX_3Ch, CINE_segmented_LAX_4Ch
+# shape: (208, 162, 50)
+
+new_hight: 64  # 200 # 64 #   
+new_width: 64  # 200 # 64 # 
+new_depth: 25  # 50 # 64 # 
+max_limit: 64 # 64 # 
+
+change_mri_dims: False
+mri_concatenate: False
+including_eid_with_missing_modalities: False
+
+#eid_map_path: /sc-projects/sc-proj-ukb-cvd/projects/duc_extra_workspace/raw_data/UKBB.application.link.file.20210608.txt
+#eid_map_from: EID.44448
+#eid_map_to: 'EID.44448' #clangenberg
+
+#down_sampled mri
+#eId_to_mri_study_directory: "/sc-projects/sc-proj-ukb-cvd/projects/sigmile-paper/code_cleanup/datasets/eid_to_heart_mri_downsampled.pickle"
+
+#225 225 225
+#eId_to_mri_study_directory: "/sc-projects/sc-proj-ukb-cvd/projects/sigmile-paper/code_cleanup/datasets/eid_to_heart_mri_nifti.pickle"
+eId_to_mri_study_directory: "/sc-projects/sc-proj-ukb-cvd/projects/sigmile-paper/code_cleanup/datasets/eid_to_heart_mri_pt.pickle"

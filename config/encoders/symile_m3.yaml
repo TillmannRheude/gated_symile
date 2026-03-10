@@ -1,0 +1,6 @@
+defaults:
+  - _self_
+
+monitor:
+  metric: "val/acc_top1"
+  mode: "max"

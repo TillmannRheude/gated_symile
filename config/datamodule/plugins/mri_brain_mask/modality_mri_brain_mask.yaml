@@ -1,0 +1,29 @@
+name: MRIDataLoaderPlugin
+init: __init__
+image_extension: nii.gz
+session_id : 2
+
+sequence_types: ["T1"]  # , "T2", "SWI", "dMRI_S0"
+
+# (182, 218, 182)
+new_hight: 182 # 225 # 64
+new_width: 218 # 225 # 64
+new_depth: 182 # 225 # 64
+max_limit: 218 # 225 # 64
+
+change_mri_dims: False
+mri_concatenate: False
+including_eid_with_missing_modalities: False
+
+eid_map_path: /sc-projects/sc-proj-ukb-cvd/projects/duc_extra_workspace/raw_data/UKBB.application.link.file.20210608.txt
+eid_map_from: EID.33073
+eid_map_to: EID.51157
+#eid_map_to: 'EID.44448' #clangenberg
+
+#down_sampled mri
+#eId_to_mri_study_directory: "/sc-projects/sc-proj-ukb-cvd/projects/duc_extra_workspace/raw_data/eId_to_directories_mri_seq_v2_downsampled_64_64.pickle"
+
+#225 225 225
+#eId_to_mri_study_directory: "/sc-projects/sc-proj-ukb-cvd/projects/duc_extra_workspace/raw_data/eId_to_directories_mri_seq_2.pickle"
+#eId_to_mri_study_directory: "/sc-projects/sc-proj-ukb-cvd/projects/sigmile-paper/code_cleanup/datasets/eid_to_brain_mri_pt.pickle"
+eId_to_mri_study_directory: "/sc-projects/sc-proj-ukb-cvd/projects/sigmile-paper/code_cleanup/datasets/eid_to_brain_mri_mask.pickle"

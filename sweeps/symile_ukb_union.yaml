@@ -1,0 +1,88 @@
+# sweep.yaml
+program: /sc-projects/sc-proj-ukb-cvd/projects/sigmile-paper/code_cleanup/main.py
+project: sigmile
+name: Symile (gate) - UKB (Proteomics Union, 512)
+method: bayes
+metric:
+  name: val/acc_top1
+  goal: maximize
+
+parameters:
+  modelname.logit_scale_init:
+    min: -3
+    max: 0
+    distribution: uniform
+  # Gate parameters
+  modelname.gate_strength_init:
+    min: -1
+    max: 6
+    distribution: uniform
+  modelname.neutral_type:
+    values: ["random_trainable"]
+  modelname.gate_mode:
+    values: ["attention"]
+  modelname.use_gate:
+    values: [True]
+  modelname.use_null:
+    values: [True]
+  modelname.renormalize:
+    values: [True]
+  modelname.gate_type:
+    values: ["sigmoid"]
+  modelname.gate_temp:
+    min: 0.2
+    max: 1.2
+    distribution: uniform
+  optimizer.lr_gate_mul:
+    min: 1.0
+    max: 20.0
+    distribution: "log_uniform_values"
+  modelname.gate_d_k:
+    values: [1024, 3072, 6144]
+  # Encoders
+  encoders.nmr.mlp.hidden_dims:
+    values: [[1024,2048,4096]]
+  encoders.nmr.mlp.hidden_dropouts:
+    values: [[0.2,0.2,0.2]]
+  encoders.ehr.mlp.hidden_dims:
+    values: [[1024,2048,4096]]
+  encoders.ehr.mlp.hidden_dropouts:
+    values: [[0.6,0.6,0.6]]
+  encoders.olink.mlp.hidden_dims:
+    values: [[1024,2048,4096]]
+  encoders.olink.mlp.hidden_dropouts:
+    values: [[0.4,0.4,0.4]]
+  # Embeddings
+  modelname.emb_dim:
+    values: [6144]
+  # Optimizer
+  optimizer.lr:
+    min: 0.00001
+    max: 0.01
+    distribution: "log_uniform_values"
+  optimizer.warmup_steps:
+    values: [0, 10, 50, 100, 200, 500, 1000, 1200]
+  optimizer.weight_decay:
+    values: [0, 0.01, 0.001]
+
+
+command:
+  - ${env}
+  - torchrun 
+  - --standalone
+  - --nproc_per_node=4
+  - ${program}
+  - --config-name=config
+  - dataset_name="ukb"
+  - encoders="ukb"
+  - max_epochs=10
+  - patience=4
+  - modelname="symile"
+  - modelname.negative_sampling="pair"
+  - wandb.group="None"
+  - batch_size=128
+  - datamodule.batch_size=128
+  - modelname.pair_num_negatives=128
+  - datamodule.combine_eids_as="union"
+  - devices=4
+  - ${args_no_hyphens}

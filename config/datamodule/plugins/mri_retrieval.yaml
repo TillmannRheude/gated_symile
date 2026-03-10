@@ -1,0 +1,30 @@
+defaults:
+ #- nmr: modality_nmr  # 249
+ #- ehr: modality_ehr  # 3584
+ - ehr_imaging: modality_ehr_imaging  # 4096
+ #- olink: modality_olink  # 1463
+ #- prs: modality_prs  # 135
+ #- bloodbio: modality_bloodbio  # 30
+ #- baselinechars: modality_baselinechars  # 28
+ #- localenvironment: modality_localenvironment  # 33
+ #- arterialstiffness: modality_arterialstiffness  # 9
+ #- anthropometry: modality_anthropometry  # 43
+ #- bloodpressure: modality_bloodpressure  # 12
+ #- ecgduringexercise: modality_ecgduringexercise  # 355
+ #- eyemeasures: modality_eyemeasures  # 310
+ #- bonedensitometry: modality_bonedensitometry  # 27
+ #- handgripstrength: modality_handgripstrength  # 2
+ #- spirometry: modality_spirometry  # 29
+ #- touchscreen: modality_touchscreen  # 119
+ #- cognitivefunction: modality_cognitivefunction  # 27
+ #- hearingtest: modality_hearingtest  # 68
+ #- verbalinterview: modality_verbalinterview  # 224
+ #- bloodcount: modality_bloodcount  # 31
+ #- urineassays: modality_urineassays  # 4
+ #- telomeres: modality_telomeres  # 4
+ #- infectiousdiseases: modality_infectiousdiseases  # 66
+ - mri_brain: modality_mri_brain
+ #- mri_brain_mask: modality_mri_brain_mask
+ - mri_brain_phenotypes: modality_mri_brain_phenotypes
+ #- mri_heart: modality_mri_heart
+ - labels: mortality  # 1

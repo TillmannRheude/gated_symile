@@ -1,0 +1,14 @@
+name: TabularPlugin
+init: _init_ 
+
+# data_paths: ["/sc-projects/sc-proj-ukb-cvd/data/3_datasets_post/230216_metabolomics/240628_events_filtered.feather"]
+
+# new version
+data_paths: ["/sc-projects/sc-proj-ukb-cvd/data/3_datasets_post/230216_metabolomics/240628_events_filtered_v2.feather"]
+
+# full labels
+#data_paths: ["/sc-projects/sc-proj-ukb-cvd/data/3_datasets_post/230216_metabolomics/240628_events.feather"]
+
+#eid_map_path: "/sc-projects/sc-proj-ukb-cvd/data/2_datasets_pre/230315_metabolomics_2/mapping/mapping_combined.txt"
+#eid_map_from: 'EID.49966'
+#eid_map_to: 'EID.44448' #clangenberg

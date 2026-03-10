@@ -1,0 +1,9 @@
+name: TabularPlugin
+init: _init_
+
+# data_paths: ["/sc-projects/sc-proj-ukb-cvd/projects/25_multimodal_ukbb/outputs/100011_blood_pressure.feather"]
+data_paths: ["/sc-projects/sc-proj-ukb-cvd/projects/data/ukb/imputed/100011_blood_pressure.feather"]
+
+eid_map_path: "/sc-resources/ukb/data/shared/reils-clangenberg/metabolomics/mapping_combined.txt"
+eid_map_from: 'EID.49966'
+eid_map_to: 'EID.44448' #clangenberg

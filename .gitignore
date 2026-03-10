@@ -1,0 +1,10 @@
+wandb/
+
+outputs
+*.out
+*.txt
+
+udm
+checkpoints
+outputs
+visualization

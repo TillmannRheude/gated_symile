@@ -1,0 +1,8 @@
+name: TabularPlugin
+init: _init_ 
+
+data_paths: ["/sc-projects/sc-proj-ukb-cvd/projects/rhti10/cama_ukbb/ehr_llm_embeddings/250729_ehr_qwen_baseline.feather"]
+
+eid_map_path: "/sc-projects/sc-proj-ukb-cvd/data/2_datasets_pre/230315_metabolomics_2/mapping/mapping_combined.txt"
+eid_map_from: 'EID.49966'
+eid_map_to: 'EID.44448' #clangenberg
