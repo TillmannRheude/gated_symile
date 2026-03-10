@@ -1,0 +1,6 @@
+name: TabularPlugin
+init: _init_
+
+# data_paths: ["/sc-projects/sc-proj-ukb-cvd/projects/25_multimodal_ukbb/outputs/100013_eye_measures.feather"]
+data_paths: ["/sc-projects/sc-proj-ukb-cvd/projects/data/ukb/imputed/100013_eye_measures.feather"]
+

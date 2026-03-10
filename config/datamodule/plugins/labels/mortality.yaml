@@ -1,0 +1,5 @@
+name: TabularPlugin
+init: _init_ 
+
+data_paths: ["/sc-projects/sc-proj-ukb-cvd/projects/data/ukb/mortality_labels_10y.feather"]
+

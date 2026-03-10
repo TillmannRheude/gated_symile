@@ -1,0 +1,10 @@
+name: TabularPlugin
+init: _init_ 
+
+# data_paths: ["/sc-projects/sc-proj-ukb-cvd/data/3_datasets_post/230216_metabolomics/240628_events_filtered.feather"]
+
+# new version
+data_paths: ["/sc-projects/sc-proj-ukb-cvd/data/3_datasets_post/230216_metabolomics/240628_events_filtered_v2.feather"]
+
+# full labels
+#data_paths: ["/sc-projects/sc-proj-ukb-cvd/data/3_datasets_post/230216_metabolomics/240628_events.feather"]

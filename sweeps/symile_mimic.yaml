@@ -1,0 +1,69 @@
+# sweep.yaml
+program: /sc-projects/sc-proj-ukb-cvd/projects/sigmile-paper/code_cleanup/main.py
+project: sigmile
+name: Symile (att gate) - Mimic
+method: bayes
+metric:
+  name: val/max_acc_top1
+  goal: maximize
+
+parameters:
+  # Symile params
+  modelname.logit_scale_init:  # 2.3025851
+    min: -3
+    max: 0
+    distribution: uniform
+  # Gate parameters
+  modelname.gate_strength_init:
+    min: -1
+    max: 6
+    distribution: uniform
+  modelname.neutral_type:
+    values: ["random_trainable"]
+  modelname.gate_mode:
+    values: ["attention"]
+  modelname.use_gate:
+    values: [True]
+  modelname.gate_type:
+    values: ["sigmoid"]
+  modelname.gate_temp:
+    min: 0.2
+    max: 1.2
+    distribution: uniform
+  optimizer.lr_gate_mul:
+    min: 1.0
+    max: 20.0
+    distribution: "log_uniform_values"
+  modelname.gate_d_k:
+    values: [256, 512, 1024]
+  # Embeddings
+  modelname.emb_dim:
+    values: [1024]
+  modelname.embedding_norm:
+    values: [True]
+  # Optimizer
+  optimizer.lr:
+    min: 0.0001
+    max: 0.9
+    distribution: "log_uniform_values"
+  optimizer.warmup_steps:
+    values: [0, 50, 200, 500, 1000, 1200]
+  optimizer.weight_decay:
+    values: [0, 0.1, 0.01, 0.001]
+
+
+command:
+  - ${env}
+  - torchrun
+  - --standalone
+  - --nproc_per_node=1
+  - ${program}
+  - --config-name=config
+  - modelname="symile"
+  - modelname.negative_sampling="pair"
+  - dataset_name="symile_mimic"
+  - encoders="symile_mimic"
+  - wandb.group="None"
+  - batch_size=280
+  - devices=1
+  - ${args_no_hyphens}

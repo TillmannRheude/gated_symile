@@ -1,0 +1,5 @@
+name: TabularPlugin
+init: _init_ 
+
+data_paths: ["/sc-projects/sc-proj-ukb-cvd/projects/sigmile-paper/code_cleanup/datasets/ehr_imagingdate.feather"]  # 4096
+

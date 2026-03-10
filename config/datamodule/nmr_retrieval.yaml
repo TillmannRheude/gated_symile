@@ -1,0 +1,22 @@
+defaults:
+ - plugins: nmr_retrieval
+ - _self_
+
+# "/sc-projects/sc-proj-ukb-cvd/projects/data/ukb/cvsplits/splits_0.yaml"
+# "/sc-projects/sc-proj-ukb-cvd/projects/data/ukb/cvsplits/splits_1.yaml"
+# "/sc-projects/sc-proj-ukb-cvd/projects/data/ukb/cvsplits/splits_2.yaml"
+# "/sc-projects/sc-proj-ukb-cvd/projects/data/ukb/cvsplits/splits_3.yaml"
+# "/sc-projects/sc-proj-ukb-cvd/projects/data/ukb/cvsplits/splits_4.yaml"
+
+splits: /sc-projects/sc-proj-ukb-cvd/projects/data/ukb/cvsplits/splits_0.yaml  # /sc-projects/sc-proj-ukb-cvd/data/3_datasets_post/230216_metabolomics/splits_0.yaml
+#splits: /sc-projects/sc-proj-ukb-cvd/results/projects/22_multimodal/data/240328/splits_51157/split_0.yaml
+train_split: 'train'
+valid_split: 'valid'
+test_split: 'test'
+combine_eids_as: 'union'  # 'intersect' / 'union' 
+num_workers: 4  # 32
+batch_size: 512  # 3072  # 512
+pin_memory: false
+drop_last: true
+shuffle: true
+keyerr: true  # true if intersect, false if union

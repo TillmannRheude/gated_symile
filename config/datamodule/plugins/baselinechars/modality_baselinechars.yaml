@@ -1,0 +1,5 @@
+name: TabularPlugin
+init: _init_ 
+
+# data_paths: ["/sc-projects/sc-proj-ukb-cvd/projects/25_multimodal_ukbb/outputs/100094_baseline_characteristics.feather"]
+data_paths: ["/sc-projects/sc-proj-ukb-cvd/projects/data/ukb/imputed/100094_baseline_characteristics.feather"]

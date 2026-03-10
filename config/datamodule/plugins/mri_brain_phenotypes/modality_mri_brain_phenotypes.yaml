@@ -1,0 +1,4 @@
+name: TabularPlugin
+init: _init_ 
+
+data_paths: ["/sc-projects/sc-proj-ukb-cvd/data/2_datasets_pre/230310_brain_mri/231021_bmri_phenotypes_scaled.feather"]

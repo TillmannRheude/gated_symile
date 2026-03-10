@@ -1,0 +1,5 @@
+name: TabularPlugin
+init: _init_ 
+
+data_paths: ["/sc-projects/sc-proj-ukb-cvd/projects/rhti10/cama_ukbb/ehr_llm_embeddings/250729_ehr_qwen_baseline.feather"]
+
