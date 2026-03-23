@@ -1,5 +1,4 @@
 import torch
-import torch.nn as nn
 import torch.distributed as dist
 from typing import Optional
 
@@ -9,17 +8,7 @@ from losses.retrieval import zeroshot_retrieval_logits
 from losses.utils import scale_mip_dvs
 
 
-class SyntheticXORModel(LightningModuleParent):
-    """
-    Synthetic XOR LightningModule.
-
-    Dataset provides three modalities (A,B,C). We evaluate a retrieval task where
-    modality A is retrieved given (B,C).
-
-    Note: the model passed in helpers currently builds a single shared encoder
-    (SyntheticXOREncoder). We apply that same encoder to all three modalities.
-    """
-
+class SyntheticXNORModel(LightningModuleParent):
     def __init__(
         self,
         model,
@@ -28,7 +17,7 @@ class SyntheticXORModel(LightningModuleParent):
     ):
         super().__init__(**args)
 
-        self.dataset_name = "synthetic_xor"
+        self.dataset_name = "synthetic_xnor"
         self.model = model
 
         if params_retrival_ds is None:
@@ -48,9 +37,7 @@ class SyntheticXORModel(LightningModuleParent):
             self.gate = ModalityAttentionGate(
                 num_modalities=len(self.modalities),
                 emb_dim=int(emb_dim),
-                num_heads=self.params_method["gate_num_heads"],
                 d_k=self.params_method["gate_d_k"],
-                d_null=self.params_method["gate_d_null"],
                 temperature_init=self.params_method["gate_temp"],
                 gate_bias_init=self.params_method["gate_bias_init"],
                 gate_strength_init=self.params_method["gate_strength_init"],
@@ -124,8 +111,6 @@ class SyntheticXORModel(LightningModuleParent):
 
             raw = scale_mip_dvs(raw, d=D, M=3)
             logits = self.logit_scale.exp() * raw
-            if self.modelname == "sigmile" and self.bias is not None:
-                logits = logits + self.bias
 
             pred = torch.argmax(logits, dim=1)
             y = torch.arange(B, device=pred.device, dtype=pred.dtype)

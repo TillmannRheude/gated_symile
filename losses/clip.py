@@ -20,7 +20,6 @@ def compute_pairwise_clip(x, y, logit_scale):
 def clip(r_a, r_b, r_c, logit_scale, negative_sampling=None, bias=None, **kwargs):
     """
     Computes the CLIP loss for 3 modalities by averaging the pairwise CLIP losses.
-    Baseline for Symile/SigMile.
     
     Args:
         r_a, r_b, r_c (torch.Tensor): Representation vectors of size (batch_sz, d).

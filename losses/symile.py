@@ -2,30 +2,7 @@ import torch
 import torch.nn.functional as F
 from losses.utils import scale_mip_dvs
 
-
 def compute_logits_neg_sampling_n(x, y, z):
-    """
-    Computes the logits for anchor modality x with batch_sz - 1 negatives for
-    each positive - or (batch_sz^2 - batch_sz) total negatives.
-
-    If batch_sz is n, then returned logits have size (n, n) with n positive
-    multilinear inner products and (n^2 - n) negative multilinear inner products.
-
-    Positive multilinear inner products (MIPs) are along the diagonal of the
-    square logits matrix. For example, the second row of `logits` might be:
-
-    [ MIP(x[1], y[3], z[2]) MIP(x[1], y[1], z[1]) MIP(x[1], y[0], z[1]) MIP(x[1], y[2], z[3]) ].
-
-    Notice that only the second element is the positive MIP; all others are negative.
-    There is a small chance of a false negative MIP.
-
-    Args:
-        x (torch.Tensor): Representation vector of size (batch_sz, d_r).
-        y (torch.Tensor): Representation vector of size (batch_sz, d_r).
-        z (torch.Tensor): Representation vector of size (batch_sz, d_r).
-    Returns:
-        logits (torch.Tensor): Logits for x of size (batch_sz, batch_sz).
-    """
     # shuffle rows of y and z
     y_shuff = y[torch.randperm(y.shape[0])]
     z_shuff = z[torch.randperm(z.shape[0])]
@@ -34,33 +11,7 @@ def compute_logits_neg_sampling_n(x, y, z):
     # insert positive triples along diagonal of shuffled logits
     return torch.where(torch.eye(n=x.shape[0]).to(x.device) > 0.5, MIP_of_pos_triples, logits_x)
 
-
 def compute_logits_neg_sampling_n_squared(x, y, z):
-    """
-    Computes the logits for anchor modality x with batch_sz^2 - 1 negatives for
-    each positive.
-
-    If batch size is n, then returned logits have size (n, n^2) with n positive
-    multilinear inner products and (n^3 - n) negative multilinear inner products.
-
-    Positive multilinear inner products (MIP) are along the main diagonal of the
-    (non-square) logits matrix. For example, if n = 4, then the second row of
-    `logits` is:
-
-    [ MIP(x[1], y[0], z[0]) MIP(x[1], y[1], z[1]) MIP(x[1], y[2], z[2]) MIP(x[1], y[3], z[3])
-      MIP(x[1], y[0], z[3]) MIP(x[1], y[1], z[0]) MIP(x[1], y[2], z[1]) MIP(x[1], y[3], z[2])
-      MIP(x[1], y[0], z[2]) MIP(x[1], y[1], z[3]) MIP(x[1], y[2], z[0]) MIP(x[1], y[3], z[1])
-      MIP(x[1], y[0], z[1]) MIP(x[1], y[1], z[2]) MIP(x[1], y[2], z[3]) MIP(x[1], y[3], z[0])  ]
-
-    Notice that only the second element is the positive MIP; all others are negative.
-
-    Args:
-        x (torch.Tensor): Representation vector of size (batch_sz, d_r).
-        y (torch.Tensor): Representation vector of size (batch_sz, d_r).
-        z (torch.Tensor): Representation vector of size (batch_sz, d_r).
-    Returns:
-        logits (torch.Tensor): Logits for x of size (batch_sz, batch_sz^2).
-    """
     y_z = []
     for i in range(y.shape[0]):
         y_z.append(y * z)
@@ -75,12 +26,11 @@ def compute_logits_neg_sampling_n_squared(x, y, z):
     logits = x @ y_z.T
     return logits
 
-
 def symile_gated(
     r_a, r_b, r_c,
     logit_scale,
     negative_sampling,
-    gate,                 # ModalityAttentionGate
+    gate,
     bias=None,
     labels=None,
     candidates=None,      # optional tuple (c_a, c_b, c_c)
@@ -140,8 +90,15 @@ def symile_gated(
                 pair_embs.append(x)
 
             # candidate-conditioned gate: queries derived from target embedding
-            W_pair = gate.compute_W(pair_embs)  # requires your gate support this
+            W_pair = gate.compute_W(pair_embs)
             gated_list, _, _ = gate.apply_for_target(t, pair_embs, W=W_pair)
+
+            # distillation loss 
+            g0 = gated_list[0].view(B, KK, D)[:, 0, :].detach()
+            g1 = gated_list[1].view(B, KK, D)[:, 0, :].detach()
+            g2 = gated_list[2].view(B, KK, D)[:, 0, :].detach()
+
+            distill = (F.mse_loss(r_a, g0) + F.mse_loss(r_b, g1) + F.mse_loss(r_c, g2)) / 3.0
 
             # symile score for target t: dot( cand_t , Π_{m!=t} gated_m )
             prod = torch.ones_like(gated_list[0])
@@ -160,12 +117,13 @@ def symile_gated(
                 logits = logits + bias  # safe no-op for symile
 
             y = torch.zeros((B,), device=r_a.device, dtype=torch.long)  # positive at column 0
-            return F.cross_entropy(logits, y)
+            return F.cross_entropy(logits, y) + (0.1 * distill)
 
         loss_a = _loss_for_target(0)
         loss_b = _loss_for_target(1)
         loss_c = _loss_for_target(2)
-        return (loss_a + loss_b + loss_c) / 3.0
+        loss_main = (loss_a + loss_b + loss_c) / 3.0
+        return loss_main
 
     # --> candidate-independent gated symile
     W_local = gate.compute_W(emb_local)
@@ -216,7 +174,8 @@ def symile_gated(
     loss_a = F.cross_entropy(logits_a, labels)
     loss_b = F.cross_entropy(logits_b, labels)
     loss_c = F.cross_entropy(logits_c, labels)
-    return (loss_a + loss_b + loss_c) / 3.0
+    loss_main = (loss_a + loss_b + loss_c) / 3.0
+    return loss_main
 
 def symile(
     r_a, 
@@ -234,17 +193,6 @@ def symile(
     loss is an average of the loss terms where each modality is treated as the
     anchor in turn.
 
-    The argument `negative_sampling` can take on one of two values:
-        - `n` (for O(n)): draws n - 1 negative samples for each positive
-        - `n_squared` (for O(n^2)): draws n^2 - 1 negative samples for each positive
-
-    Args:
-        r_a, r_b, r_c (torch.Tensor): Representation vectors each of size (batch_sz, d_r).
-        logit_scale (torch.Tensor): Learned temperature parameter.
-        negative_sampling (str): Specifies the negative sampling strategy.
-                                 Must be either `n` or `n_squared`.
-        bias (torch.Tensor, optional): Bias parameter for SigLIP loss. Not used in Symile loss.
-
     Returns:
         (torch.Tensor): Average over the losses where each modality is treated
                         as the anchor in turn.
@@ -260,9 +208,6 @@ def symile(
     emb_local = [r_a, r_b, r_c]
 
     if negative_sampling == "pair":
-        print(f"pair_num_negatives: {pair_num_negatives}")
-        # pair_num_negatives = 128
-
         B = r_a.shape[0]
         if labels is None:
             # local in-batch positives
@@ -344,4 +289,3 @@ def symile(
     loss_b = F.cross_entropy(logits_b, labels)
     loss_c = F.cross_entropy(logits_c, labels)
     return (loss_a + loss_b + loss_c) / 3.0
-

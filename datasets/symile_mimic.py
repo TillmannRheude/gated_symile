@@ -10,10 +10,6 @@ class Dataset_SymileMimic(Dataset):
         data_dir: str = "/sc-resources/dh-mimic/mimic_symile/original_data_and_splits/",
         split: str = "train",
         split_nr: int = 0,
-        permute: bool = False,
-        permute_p: float = 0.0,
-        permute_mod: list[str] = None,
-        permute_seed: int = None,
     ):
         self.data_dir = data_dir
         self.split = split

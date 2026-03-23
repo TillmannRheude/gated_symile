@@ -253,9 +253,9 @@ class UKBTabularEncoder(nn.Module):
 
 
 """
-Synthetic XOR
+Synthetic XNOR
 """
-class SyntheticXOREncoder(nn.Module):
+class SyntheticXNOREncoder(nn.Module):
     def __init__(
         self,
         input_dim: int = 128,

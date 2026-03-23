@@ -11,3 +11,7 @@ visualization
 debug.ipynb
 test
 sweeps
+
+config/datamodule/*
+
+__pycache__/

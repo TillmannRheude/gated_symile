@@ -1,10 +1,10 @@
 defaults:
   - _self_
   - datamodule: debug
-  - encoders: synthetic_xor  # symile_mimic / symile_m3 / ukb / ukb_debug
-  - modelname: symile  # clip / symile / sigmile
+  - encoders: synthetic_xnor  # symile_mimic / symile_m3 / ukb / ukb_debug
+  - modelname: symile  # clip / symile
 
-dataset_name: synthetic_xor  # symile_mimic / symile_m3 / ukb
+dataset_name: synthetic_xnor  # symile_mimic / symile_m3 / ukb
 batch_size: 4096
 split_nr: 1
 devices: 1
@@ -26,5 +26,8 @@ patience: 5
 monitor: "val/acc_top1"
 monitor_mode: "max"
 wandb:
-  project: "sigmile"
+  project: "gatedsymile"
   group: None
+
+ckpt_dir: "checkpoints"
+ckpt_name: None

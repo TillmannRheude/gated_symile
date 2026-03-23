@@ -3,17 +3,7 @@ from torch.utils.data import Dataset
 from typing import Dict
 
 
-class SyntheticXOR(Dataset):
-    """
-    Single-distribution dataset for Symile:
-      returns one triple (A,B,C) per index (no clean/corr branching).
-
-    Symile training:
-      - corruption is fixed in the representations and affects all directions consistently.
-
-    Validation:
-      - evaluate retrieval for one target direction on the same data distribution.
-    """
+class SyntheticXNOR(Dataset):
     def __init__(
         self, 
         n_samples: int = 100000,

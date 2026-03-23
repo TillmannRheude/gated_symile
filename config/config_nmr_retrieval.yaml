@@ -2,7 +2,7 @@ defaults:
   - _self_
   - datamodule: nmr_retrieval
   - encoders: ukb_nmr_retrieval  # symile_mimic / symile_m3 / ukb
-  - modelname: symile  # clip / symile / sigmile
+  - modelname: symile  # clip / symile
 
 dataset_name: ukb  # symile_mimic / symile_m3 / ukb
 batch_size: 512
@@ -26,5 +26,8 @@ patience: 5
 monitor: "val/acc_top1"
 monitor_mode: "max"
 wandb:
-  project: "sigmile"
+  project: "gatedsymile"
   group: None
+
+ckpt_dir: "checkpoints"
+ckpt_name: None
