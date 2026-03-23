@@ -1,11 +1,11 @@
 defaults:
   - _self_
   - datamodule: default
-  - encoders: ukb  # symile_mimic / symile_m3 / ukb
+  - encoders: symile_mimic  # symile_mimic / ukb
   - modelname: symile  # clip / symile
 
-dataset_name: ukb  # symile_mimic / symile_m3 / ukb
-batch_size: 1024
+dataset_name: symile_mimic  # symile_mimic / ukb
+batch_size: 256
 split_nr: 1
 devices: 1
 
@@ -26,15 +26,8 @@ patience: 5
 monitor: "val/acc_top1"
 monitor_mode: "max"
 wandb:
-  project: "sigmile"
+  project: "gatedsymile"
   group: None
 
-ckpt_dir: "/sc-projects/sc-proj-ukb-cvd/projects/sigmile-paper/code_cleanup/checkpoints"
+ckpt_dir: "checkpoints"
 ckpt_name: None
-probe:
-  lr: 1e-3
-  weight_decay: 0.0
-  max_epochs: 20
-  patience: 5
-  monitor: "val/probe_auroc_concat"
-  monitor_mode: "max"

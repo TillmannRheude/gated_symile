@@ -1,8 +1,5 @@
 import torch
-import time
-import torch.nn as nn
 import torch.distributed as dist
-from torchmetrics.classification import BinaryAUROC
 
 from lightningmodules.utils import LightningModuleParent
 from losses.retrieval import zeroshot_retrieval_logits
@@ -31,26 +28,13 @@ class UKBModel(LightningModuleParent):
         self.val_step_accuracies = []
         self.test_step_accuracies = []
 
-        # linear probe w.r.t. modality prediction
-        self.probe_on = True
-        self.emb_dim = model.encoders[candidate_idx].emb_dim
-        self.probe = nn.Linear(self.emb_dim * 3, 1)
-        self.probe_loss = nn.BCEWithLogitsLoss()
-        self.probe_metrics = nn.ModuleList([BinaryAUROC() for _ in range(3)])  # train, val, test
-
-        self.unimodal_probe = nn.ModuleList([nn.Linear(self.emb_dim, 1) for _ in range(3)])
-        self.unimodal_probe_loss = nn.BCEWithLogitsLoss()
-        self.unimodal_probe_metrics = nn.ModuleList([nn.ModuleList([BinaryAUROC() for _ in range(3)]) for _ in range(3)])  # train, val, test for mod0, mod1, mod2
-
         # gate
         self.use_gate = self.params_method["use_gate"]
         if self.use_gate:
             self.gate = ModalityAttentionGate(
                 num_modalities=len(self.modalities),
                 emb_dim=self.emb_dim,
-                num_heads=self.params_method["gate_num_heads"],
                 d_k=self.params_method["gate_d_k"],
-                d_null=self.params_method["gate_d_null"],
                 temperature_init=self.params_method["gate_temp"],
                 gate_bias_init=self.params_method["gate_bias_init"],
                 gate_strength_init=self.params_method["gate_strength_init"],
@@ -75,97 +59,13 @@ class UKBModel(LightningModuleParent):
         B = x.shape[0]
         return ~torch.isnan(x).reshape(B, -1).all(dim=1)
 
-    def clip_and_normalize(
-        self,
-        x: torch.Tensor,
-        clip_percentiles=(1.0, 99.0),
-        eps: float = 1e-6,
-        use_nonzero: bool = True,
-        min_count: int = 100,
-    ) -> torch.Tensor:
-        """
-        x: (H,W,T) or (C,H,W,T) or (B,C,H,W,T). Returns same shape, float32.
-        Per-sample, per-channel robust clipping + normalization (batched, no Python loops).
-        """
-        x_in_ndim = x.ndim
-        x = x.float()
-
-        # Canonicalize to (B,C,H,W,T)
-        if x.ndim == 3:
-            x = x.unsqueeze(0).unsqueeze(0)
-        elif x.ndim == 4:
-            x = x.unsqueeze(0)
-        elif x.ndim != 5:
-            raise ValueError(f"Unsupported shape: {tuple(x.shape)}")
-
-        B, C, H, W, T = x.shape
-        BC = B * C
-        N = H * W * T
-
-        x_flat = x.reshape(BC, N)  # (BC, N)
-
-        q_lo = clip_percentiles[0] / 100.0
-        q_hi = clip_percentiles[1] / 100.0
-
-        if use_nonzero:
-            mask = x_flat > 0
-            cnt = mask.sum(dim=1)  # (BC,)
-
-            # Use only nonzero values via NaN-masking (nanquantile ignores NaNs)
-            x_nz = x_flat.masked_fill(~mask, float("nan"))
-
-            # Quantiles on nonzero rows
-            lo_nz = torch.nanquantile(x_nz, q_lo, dim=1)
-            hi_nz = torch.nanquantile(x_nz, q_hi, dim=1)
-
-            # Fallback quantiles on all values for low-count rows
-            lo_all = torch.quantile(x_flat, q_lo, dim=1)
-            hi_all = torch.quantile(x_flat, q_hi, dim=1)
-
-            use_all = cnt < min_count
-            lo = torch.where(use_all, lo_all, lo_nz)
-            hi = torch.where(use_all, hi_all, hi_nz)
-        else:
-            lo = torch.quantile(x_flat, q_lo, dim=1)
-            hi = torch.quantile(x_flat, q_hi, dim=1)
-
-        # Clamp + normalize (broadcast per row)
-        lo = lo[:, None]
-        hi = hi[:, None]
-        denom = (hi - lo).clamp_min(eps)
-
-        x_clip = x_flat.clamp(lo, hi)
-        out = (x_clip - lo) / denom
-
-        out = out.reshape(B, C, H, W, T)
-
-        # Restore original dimensionality
-        if x_in_ndim == 3:
-            return out[0, 0]
-        if x_in_ndim == 4:
-            return out[0]
-        return out
-
     def _get_modalities(self, batch):
-        modality_type_0 = "tabular_data" if "mri_brain" != self.modalities[0] and "mri_heart" != self.modalities[0] else "mri_data"
-        modality_type_1 = "tabular_data" if "mri_brain" != self.modalities[1] and "mri_heart" != self.modalities[1] else "mri_data"
-        modality_type_2 = "tabular_data" if "mri_brain" != self.modalities[2] and "mri_heart" != self.modalities[2] else "mri_data"
-
-        if self.modalities[0] == "mri_heart" or self.modalities[0] == "mri_brain":
-            x0 = self.masked_zscore_keep_zeros(batch[self.modalities[0]][modality_type_0])
-        else:
-            x0 = batch[self.modalities[0]][modality_type_0]
-            
-        if self.modalities[1] == "mri_heart" or self.modalities[1] == "mri_brain":
-            x1 = self.masked_zscore_keep_zeros(batch[self.modalities[1]][modality_type_1])
-        else:
-            x1 = batch[self.modalities[1]][modality_type_1]
-
-        if self.modalities[2] == "mri_heart" or self.modalities[2] == "mri_brain":
-            x2 = self.masked_zscore_keep_zeros(batch[self.modalities[2]][modality_type_2])
-        else:
-            x2 = batch[self.modalities[2]][modality_type_2]
-
+        modality_type_0 = "tabular_data"
+        modality_type_1 = "tabular_data"
+        modality_type_2 = "tabular_data"
+        x0 = batch[self.modalities[0]][modality_type_0]
+        x1 = batch[self.modalities[1]][modality_type_1]
+        x2 = batch[self.modalities[2]][modality_type_2]
         return [
             x0,
             x1,
@@ -192,78 +92,8 @@ class UKBModel(LightningModuleParent):
             #batch["infectiousdiseases"]["tabular_data"],
         ]
 
-    def masked_zscore_keep_zeros(
-        self,
-        x: torch.Tensor,
-        eps: float = 1e-6,
-        min_count: int = 100,
-    ) -> torch.Tensor:
-        """
-        Masked z-score normalization using foreground voxels (x>0) only.
-        Background (x<=0) stays 0.
-
-        Works for:
-        - (D,H,W)
-        - (C,D,H,W)
-        - (B,C,D,H,W)
-
-        Returns float32 tensor with same shape.
-        """
-        threshold = 1e-3 
-
-        x_in = x
-        x = x.float()
-        ndim = x.ndim
-
-        # Canonicalize to (B,C,D,H,W)
-        if ndim == 3:
-            x = x.unsqueeze(0).unsqueeze(0)
-        elif ndim == 4:
-            x = x.unsqueeze(0)
-        elif ndim != 5:
-            raise ValueError(f"Unsupported shape: {tuple(x_in.shape)}")
-
-        B, C, D, H, W = x.shape
-        BC = B * C
-        N = D * H * W
-
-        xf = x.reshape(BC, N)                 # (BC, N)
-        mask = xf > threshold                 # foreground mask
-        cnt = mask.sum(dim=1).clamp_min(1)    # (BC,)
-
-        # Sum and sumsq over foreground only
-        xf_masked = xf * mask
-        s = xf_masked.sum(dim=1)              # (BC,)
-        ss = (xf_masked * xf_masked).sum(dim=1)
-
-        mean_fg = s / cnt
-        var_fg = ss / cnt - mean_fg * mean_fg
-        std_fg = var_fg.clamp_min(0).sqrt()
-
-        # Fallback for tiny foreground: use all voxels stats
-        mean_all = xf.mean(dim=1)
-        std_all = xf.std(dim=1, unbiased=False).clamp_min(eps)
-
-        use_all = (cnt < min_count) | (std_fg < eps)
-        mean = torch.where(use_all, mean_all, mean_fg)
-        std = torch.where(use_all, std_all, std_fg).clamp_min(eps)
-
-        # Apply z-score on foreground only; keep background at 0
-        out = (xf - mean[:, None]) / std[:, None]
-        out = out * mask.to(out.dtype)
-
-        out = out.reshape(B, C, D, H, W)
-
-        # Restore original dimensionality
-        if ndim == 3:
-            return out[0, 0]
-        if ndim == 4:
-            return out[0]
-        return out
-
     def forward(self, batch):
         x = self._get_modalities(batch)
-
         return self.model(x)
     
     def build_candidate_bank(self, split):
@@ -339,40 +169,6 @@ class UKBModel(LightningModuleParent):
         cls_full = torch.cat([cls_gather[i][:lens[i]] for i in range(dist.get_world_size())], dim=0)
 
         return {"r": r_full, "cls_id": cls_full}
-
-        r_list, cls_list = [], []
-        dl = self.trainer.datamodule.val_dataloader() if split == "val" else self.trainer.datamodule.test_dataloader()
-        for batch in dl:
-            mods = self._get_modalities(batch)
-            cls_id = torch.tensor(batch["eids"]).to(self.device)
-
-            candidates_raw = mods[self.candidate_idx].to(self.device)  # may contain NaNs
-            present_cand = self._modality_present(candidates_raw)
-            if present_cand.sum().item() == 0:
-                continue
-
-            candidates = candidates_raw[present_cand]
-            reps = self.model.encoders[self.candidate_idx](candidates)
-            if self.params_method.get("embedding_norm", False):
-                reps = nn.functional.normalize(reps, dim=1)
-
-            r_list.append(reps)
-            cls_list.append(cls_id[present_cand])
-
-        if not r_list:
-            return None
-
-        r_local = torch.cat(r_list)
-        cls_local = torch.cat(cls_list)
-
-        r_full = self.all_gather(r_local)
-        cls_full = self.all_gather(cls_local)
-
-        if r_full.dim() > 2:
-            r_full = r_full.reshape(-1, r_full.shape[-1])
-            cls_full = cls_full.reshape(-1)
-
-        return {"r": r_full, "cls_id": cls_full}
     
     def retrieval_step(self, batch, embeddings, split):
         bank = getattr(self, "candidate_bank", None)
@@ -408,8 +204,8 @@ class UKBModel(LightningModuleParent):
             # -----------------------------------------
             cand_dep = True
             if cand_dep and getattr(self.gate, "gate_mode", None) == "attention":
-                if self.modelname not in ("symile", "sigmile"):
-                    raise ValueError("candidate-dependent gating implemented for symile/sigmile retrieval only.")
+                if self.modelname not in ("symile"):
+                    raise ValueError("candidate-dependent gating implemented for symile retrieval only.")
 
                 Bk = emb_keep[0].shape[0]
                 D = emb_keep[0].shape[1]
@@ -440,7 +236,7 @@ class UKBModel(LightningModuleParent):
                             x = x0.unsqueeze(1).expand(Bk, Nc, D).reshape(Bk * Nc, D)
                         pair_embs.append(x)
 
-                    # IMPORTANT: query_mode="target" makes Q_t depend on the target embedding (the candidate)
+                    # query_mode="target" makes Q_t depend on the target embedding (the candidate)
                     W_pair = self.gate.compute_W(pair_embs)  # (Bk*Nc, M, M)
                     gated_list, w_pair, _ = self.gate.apply_for_target(self.candidate_idx, pair_embs, W=W_pair)
 
@@ -460,7 +256,7 @@ class UKBModel(LightningModuleParent):
                     sum_w += w_pair.detach().sum(dim=0)  # (M_total,)
                     count_w += int(w_pair.shape[0])
 
-                    # symile/sigmile retrieval logits:
+                    # symile retrieval logits:
                     # logit(i,j) = < cand_j , Π_m gated_query_m(i,j) >
                     prod = torch.ones_like(gated_list[query_indices[0]])
                     for qi in query_indices:
@@ -473,14 +269,12 @@ class UKBModel(LightningModuleParent):
 
                 logits = torch.cat(logits_chunks, dim=1)  # (Bk, N)
 
-                # match losses/retrieval.py scaling for symile/sigmile
+                # match losses/retrieval.py scaling for symile
                 M = len(query_indices) + 1
                 scale_base = D ** ((M - 1) / 2)
                 logits = logits * scale_base
 
                 logits = logits * self.logit_scale.exp()
-                if self.modelname == "sigmile" and self.bias is not None:
-                    logits = logits + self.bias
 
                 y = torch.tensor(batch["eids"]).to(self.device)[keep]
                 pred = r_cls_id[torch.argmax(logits, dim=1)]
@@ -488,8 +282,6 @@ class UKBModel(LightningModuleParent):
                 if count_w > 0:
                     mean_w = sum_w / float(count_w)  # (M_total,)
                     for j in range(M_total):
-                        # usually you care most about the non-candidate modalities,
-                        # but you can log all of them if you want
                         self.log(
                             f"{split}/gate_{names[j]}_mean",
                             mean_w[j],
@@ -522,7 +314,6 @@ class UKBModel(LightningModuleParent):
             rep_list = [gated_list[i] for i in query_indices]
         else:
             rep_list = [embeddings[i][keep] for i in query_indices]  # list of (B_keep, D)
-        #rep_list = [embeddings[i][keep] for i in query_indices]
 
         r_candidates = bank["r"]
         logits = zeroshot_retrieval_logits(
@@ -537,63 +328,9 @@ class UKBModel(LightningModuleParent):
         r_cls_id = bank["cls_id"]
         pred = r_cls_id[torch.argmax(logits, dim=1)]
         return (y == pred).float().tolist()
-
-    @torch.no_grad()
-    def _inbatch_retrieval_acc_top1(self, batch, embeddings):
-        """
-        In-batch retrieval: candidates are the SAME batch, so logits are (B,B).
-        Returns scalar accuracy in [0,1] or None if invalid.
-        """
-        # eids are the "class id" we want to retrieve
-        eids = torch.tensor(batch["eids"], device=self.device, dtype=torch.long)
-        if eids.numel() == 0:
-            return None
-
-        # candidates: candidate modality embeddings from this batch
-        r_candidates = embeddings[self.candidate_idx]  # (B, d)
-
-        # queries: all other modality embeddings
-        query_indices = [i for i in range(len(embeddings)) if i != self.candidate_idx]
-        if not query_indices:
-            return None
-
-        if getattr(self, "use_gate", False) and getattr(self, "gate", None) is not None:
-            gated_list, w_t, _ = self.gate.apply_for_target(self.candidate_idx, embeddings)  # no keep mask here
-            rep_list = [gated_list[i] for i in query_indices]
-        else:
-            rep_list = [embeddings[i] for i in query_indices]
-
-        # logits: (B, B)
-        logits = zeroshot_retrieval_logits(
-            r_candidates,
-            rep_list,
-            self.logit_scale.exp(),
-            bias=self.bias,
-            modelname=self.modelname,
-        )
-
-        pred_idx = torch.argmax(logits, dim=1)  # (B,)
-        pred_eid = eids[pred_idx]               # (B,)
-        return (pred_eid == eids).float().mean()
     
     def training_step(self, batch, batch_idx):
         # get loss + embeddings from the shared step (this also logs train/loss)
         loss, embeddings = self.shared_step(batch, "train", return_embeddings=True)
-
-        acc = self._inbatch_retrieval_acc_top1(batch, embeddings)
-        if acc is not None:
-            self.log(
-                "train/inbatch_acc_top1",
-                acc,
-                on_step=True,
-                on_epoch=True,
-                prog_bar=True,
-                sync_dist=True,
-            )
-
-        # debug
-        #emb = embeddings[0]   # MRI embedding
-        #print("emb std:", emb.std().item(), "mean cosine offdiag:",
-        #    (emb @ emb.t()).fill_diagonal_(0).mean().item())
 
         return loss

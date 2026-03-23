@@ -5,9 +5,9 @@ from torch.utils.data import DataLoader
 from torch.utils.data import random_split, Subset
 import torch
 
-from datasets.synthetic_xor import SyntheticXOR
+from datasets.synthetic_xnor import SyntheticXNOR
 
-class DataModule_SyntheticXOR(pl.LightningDataModule):
+class DataModule_SyntheticXNOR(pl.LightningDataModule):
     def __init__(
         self, 
         batch_size: int = 128,
@@ -46,7 +46,7 @@ class DataModule_SyntheticXOR(pl.LightningDataModule):
         self.num_workers = 4
 
     def setup(self, stage):
-        self.ds = SyntheticXOR(
+        self.ds = SyntheticXNOR(
             n_samples=self.n_samples,
             dims_modality=self.dims_modality,
             n_bits=self.n_bits,

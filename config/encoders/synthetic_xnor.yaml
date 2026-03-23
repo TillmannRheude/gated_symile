@@ -10,22 +10,16 @@ n_samples: 30000
 
 dims_modality: [128, 128, 128]
 
-# This dataset is evaluated with *instance* retrieval (match index i within the batch).
-# With n_bits=1 there are only 2 possible A values (xor bit), so many samples become
-# indistinguishable and acc@top1 is bounded near ~1/(batch_size/2).
-# Use n_bits>=16 (or so) to make collisions negligible while keeping pairwise MI ≈ 0.
 n_bits: 16
 
-# How to embed the signal:
 # - xnor_only: A carries only (xor/xnor)(u,v) bits; B carries u; C carries v (original setup).
 # - u_v_uv: A carries [u, v, (xor/xnor)(u,v)] and B/C are structured so that B⊙C = [u, v, (xor/xnor)(u,v)].
-#   This adds redundancy so per-sample gating can recover when exactly one of {B,C} is corrupted.
 embed_mode: "u_v_uv"
 
 # keep real signal (0.5 kills info completely)
 p_flips: [0.0, 0.0]
 
-# keep candidate modality A mostly clean; corrupt anchors asymmetrically
+# corruption probabilities
 p_corrs: [0.0, 0.4, 0.4]
 
 # use misleading corruption (not gaussian) so ungated gets pulled the wrong way

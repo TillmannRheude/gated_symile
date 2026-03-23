@@ -101,41 +101,6 @@ class LightningModuleParent(pl.LightningModule):
 
         if self.params_method["embedding_norm"]:
             embeddings = [nn.functional.normalize(emb, dim=1) for emb in embeddings]
-
-        probe_loss = None
-        unimodal_probe_loss = torch.tensor(0.0)
-        # Linear probe w.r.t. modality prediction
-        if getattr(self, "probe_on", False):
-            y = batch["labels"]["tabular_data"]
-            y = y.to(self.device).float().view(-1)
-
-            valid = ~torch.isnan(y)
-            if valid.any():
-                embs = [embeddings[i] for i in [0, 1, 2]]
-                embs = [e.detach() for e in embs]
-                z = torch.cat(embs, dim=1)  # .mean(dim=0)
-
-                logits = self.probe(z).view(-1)
-                probe_loss = self.probe_loss(logits[valid], y[valid])
-
-                if set == "train":
-                    self.probe_metrics[0].update(logits[valid], y[valid].to(torch.int))
-                elif set == "val":
-                    self.probe_metrics[1].update(logits[valid], y[valid].to(torch.int))
-                elif set == "test":
-                    self.probe_metrics[2].update(logits[valid], y[valid].to(torch.int))
-                self.log(f"{set}/probe_loss", probe_loss, on_step=False, on_epoch=True, sync_dist=True)
-
-                for i in range(3):
-                    logits = self.unimodal_probe[i](embs[i]).view(-1)
-                    unimodal_probe_loss = unimodal_probe_loss + self.unimodal_probe_loss(logits[valid], y[valid])
-                    self.log(f"{set}/probe_loss_{i}", unimodal_probe_loss, on_step=False, on_epoch=True, sync_dist=True)
-                    if set == "train":
-                        self.unimodal_probe_metrics[0][i].update(logits[valid], y[valid].to(torch.int))
-                    elif set == "val":
-                        self.unimodal_probe_metrics[1][i].update(logits[valid], y[valid].to(torch.int))
-                    elif set == "test":
-                        self.unimodal_probe_metrics[2][i].update(logits[valid], y[valid].to(torch.int))
         
         # DDP for Symile n^2
         if (
@@ -260,9 +225,6 @@ class LightningModuleParent(pl.LightningModule):
             self.log(f"{set}/bias", self.bias.detach(), on_step=True, on_epoch=True, sync_dist=True, prog_bar=False)
             self.log(f"{set}/logit_scale_exp", self.logit_scale.exp().detach(), on_step=True, on_epoch=True, sync_dist=True, prog_bar=False)
 
-        if probe_loss is not None and unimodal_probe_loss is not None:
-            loss = loss + 0.1 * probe_loss + 0.1 * unimodal_probe_loss
-
         if return_embeddings:
             return loss, embeddings
         return loss
@@ -324,15 +286,10 @@ class LightningModuleParent(pl.LightningModule):
         if not names or len(names) != M:
             names = [f"m{i}" for i in range(M)]
 
-        # global summary
-        #self.log(f"{set}/gate_w/mean", w.mean(), on_step=True, on_epoch=True, sync_dist=True)
-        #self.log(f"{set}/gate_w/std",  w.std(unbiased=False), on_step=True, on_epoch=True, sync_dist=True)
-
         # per-modality summaries
         for i, name in enumerate(names):
             wi = w[:, i]
             self.log(f"{set}/gate_w/{name}_mean", wi.mean(), on_step=False, on_epoch=True, sync_dist=True)
-            #self.log(f"{set}/gate_w/{name}_std",  wi.std(unbiased=False), on_step=True, on_epoch=True, sync_dist=True)
 
     def _log_gate_cos_alignment(
         self,
@@ -473,43 +430,8 @@ class LightningModuleParent(pl.LightningModule):
             # store per-step global stats on rank 0 only
             if self.trainer.is_global_zero and count > 0:
                 self.val_step_accuracies.append((float(stats[0].item()), float(stats[1].item())))
-            
-            # debug 
-            #acc = self._inbatch_retrieval_acc_top1(batch, embeddings)
-            #if acc is not None:
-            #    self.log(
-            #        "val/inbatch_acc_top1",
-            #        acc,
-            #        on_step=True,
-            #        on_epoch=True,
-            #        prog_bar=True,
-            #        sync_dist=True,
-            #    )
 
         return loss
-        loss, embeddings = self.shared_step(batch, "val", return_embeddings=True)
-        if hasattr(self, "retrieval_step"):
-            accs = self.retrieval_step(batch, embeddings, split="val") or []
-            if accs:
-                acc_tensor = torch.tensor(accs, device=self.device)
-                gathered = self.all_gather(acc_tensor)
-                if self.trainer.is_global_zero:
-                    self.val_step_accuracies.extend(gathered.flatten().tolist())
-        return loss
-        if self.dataset_name == "symile_mimic":
-            loss = self.shared_step(batch, "val")
-            return loss
-        elif self.dataset_name == "symile_m3":
-            loss, embeddings = self.shared_step(batch, "val", return_embeddings=True)
-            accuracies = self.zeroshot_retrieval(
-                r_a=embeddings[0],
-                r_t=embeddings[2],
-                batch=batch,
-                split="val",
-                split_nr=self.params_retrival_ds["split_nr"]
-            )
-            self.val_step_accuracies.extend(accuracies)
-            return loss
 
     def test_step(self, batch, batch_idx):
         loss, embeddings = self.shared_step(batch, "test", return_embeddings=True)
@@ -530,29 +452,16 @@ class LightningModuleParent(pl.LightningModule):
                 self.test_step_accuracies.append((float(stats[0].item()), float(stats[1].item())))
 
         return loss
-        loss, embeddings = self.shared_step(batch, "test", return_embeddings=True)
-        if hasattr(self, "retrieval_step"):
-            accs = self.retrieval_step(batch, embeddings, split="test") or []
-            if accs:
-                acc_tensor = torch.tensor(accs, device=self.device)
-                gathered = self.all_gather(acc_tensor)
-                if self.trainer.is_global_zero:
-                    self.test_step_accuracies.extend(gathered.flatten().tolist())
-        return loss
 
     def run_zeroshot_retrieval(self, set: str = "val"):
         if self.dataset_name == "symile_mimic":
             acc_dict = self.zeroshot_retrieval(f"{set}", split_nr=self.params_retrival_ds["split_nr"])
             acc_top1 = acc_dict["acc@top1"]
-
-            self.log(f"{set}/auroc_mean", acc_dict["auroc_mean"], sync_dist=True, prog_bar=True)
         elif self.dataset_name == "symile_m3":
             acc_return = self.zeroshot_retrieval(f"{set}", split_nr=self.params_retrival_ds["split_nr"])
             acc_top1 = acc_return
         else:
             raise ValueError(f"Dataset {self.dataset_name} not supported, yet.")
-
-        # self.log(f"{set}/acc_top1", acc_top1, sync_dist=True, prog_bar=False)
         
         # get best metrics over epochs 
         current_set_loss = self.trainer.callback_metrics[f"{set}/loss_epoch"].item()
@@ -571,14 +480,6 @@ class LightningModuleParent(pl.LightningModule):
 
     def on_train_start(self):
         self.set_optimizer_mode(mode="train")
-    
-    def on_train_epoch_end(self):
-        if getattr(self, "probe_on", False):
-            self.log(f"train/probe_auroc", self.probe_metrics[0].compute(), sync_dist=True, prog_bar=True)
-            self.probe_metrics[0].reset()
-            for i in range(3):
-                self.log(f"train/probe_auroc_{i}", self.unimodal_probe_metrics[0][i].compute(), sync_dist=True, prog_bar=True)
-                self.unimodal_probe_metrics[0][i].reset()
 
     def on_validation_start(self):
         self.set_optimizer_mode(mode="eval")
@@ -588,25 +489,12 @@ class LightningModuleParent(pl.LightningModule):
             self.candidate_bank = self.build_candidate_bank(split="val")
         else:
             self.candidate_bank = None
-        """ 
-        if self.dataset_name == "symile_m3":
-            assert self.val_step_accuracies == [], "val_step_accuracies is not empty"
-
-            self.save_candidate_image_representations("val")
-        """
 
     def on_validation_epoch_end(self):
         # During sanity check, it's normal to have no candidate bank / no valid queries
         if getattr(self.trainer, "sanity_checking", False):
             self.val_step_accuracies.clear()
             return
-
-        if getattr(self, "probe_on", False):
-            self.log(f"val/probe_auroc", self.probe_metrics[1].compute(), sync_dist=True, prog_bar=True)
-            self.probe_metrics[1].reset()
-            for i in range(3):
-                self.log(f"val/probe_auroc_{i}", self.unimodal_probe_metrics[1][i].compute(), sync_dist=True, prog_bar=True)
-                self.unimodal_probe_metrics[1][i].reset()
 
         current = self.trainer.callback_metrics.get("val/loss")
         self.val_loss_best.update(current)
@@ -654,16 +542,12 @@ class LightningModuleParent(pl.LightningModule):
             if self.trainer.is_global_zero:
                 acc_dict = self.run_zeroshot_retrieval("val")
                 acc_top1 = float(acc_dict["acc@top1"])
-                auroc_mean = float(acc_dict.get("auroc_mean", float("nan")))
             else:
                 acc_top1 = float("nan")
-                auroc_mean = float("nan")
 
             acc_t = torch.tensor(acc_top1, device=self.device)
-            auroc_t = torch.tensor(auroc_mean, device=self.device)
             if ddp:
                 dist.broadcast(acc_t, src=0)
-                dist.broadcast(auroc_t, src=0)
 
             acc_val = float(acc_t.item())
             if acc_val == acc_val:  # not NaN
@@ -680,13 +564,8 @@ class LightningModuleParent(pl.LightningModule):
                 rank_zero_only=False,
             )
 
-            # Optional: only log AUROC if present (avoid NaN spam)
-            if float(auroc_t.item()) == float(auroc_t.item()):
-                self.log("val/auroc_mean", auroc_t, prog_bar=True, sync_dist=False, rank_zero_only=False)
-
             return
 
-        # Nothing to do
         return
 
     def on_test_start(self):
@@ -721,30 +600,11 @@ class LightningModuleParent(pl.LightningModule):
             self.log("test/acc_top1", acc_top1, sync_dist=True, prog_bar=False)
             return
 
-        if getattr(self, "probe_on", False):
-            self.log(f"test/probe_auroc", self.probe_metrics[2].compute(), sync_dist=True, prog_bar=True)
-            self.probe_metrics[2].reset()
-            for i in range(3):
-                self.log(f"test/probe_auroc_{i}", self.unimodal_probe_metrics[2][i].compute(), sync_dist=True, prog_bar=True)
-                self.unimodal_probe_metrics[2][i].reset()
-
     def _all_gather_with_grad(self, x: torch.Tensor) -> torch.Tensor:
         if not (dist.is_available() and dist.is_initialized()) or dist.get_world_size() == 1:
             return x
         xs = distnn.all_gather(x) 
         return torch.cat(xs, dim=0)   # (B_global, d)
-
-    @staticmethod
-    def _pairwise_auroc_1pos(pos_score: torch.Tensor, neg_scores: torch.Tensor) -> torch.Tensor:
-        """
-        AUROC for a single query with exactly 1 positive and N negatives:
-        P(pos > neg) + 0.5 * P(pos == neg)
-        """
-        if neg_scores.numel() == 0:
-            return pos_score.new_tensor(1.0)
-        gt = (pos_score > neg_scores).float().mean()
-        eq = (pos_score == neg_scores).float().mean()
-        return gt + 0.5 * eq
 
     def _apply_loss_mask(self, embeddings: list[torch.Tensor], mask: torch.Tensor) -> list[torch.Tensor]:
         # mask: (B,) bool
@@ -768,10 +628,6 @@ class LightningModuleParent(pl.LightningModule):
             return optim
 
     def configure_optimizers(self):
-        #param_groups = [
-        #    p for p in self.parameters() if p.requires_grad
-        #]
-
         if self.params_method["use_gate"]:
             gate_params = []
             base_params = []
@@ -794,8 +650,6 @@ class LightningModuleParent(pl.LightningModule):
         if self.params_optimizer["name"] == "schedulefree_adamw":
             optimizer = schedulefree.AdamWScheduleFree(
                 param_groups, 
-                #lr=self.params_optimizer["lr"],
-                #weight_decay=self.params_optimizer["weight_decay"], 
                 eps=self.params_optimizer["eps"],
                 warmup_steps=self.params_optimizer["warmup_steps"],
                 betas=self.params_optimizer["betas"]

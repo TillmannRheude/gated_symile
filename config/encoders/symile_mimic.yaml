@@ -4,11 +4,3 @@ defaults:
 monitor:
   metric: "val/acc_top1"
   mode: "max"
-
-mimic_retrieval_mode: "preselected"  # preselected / global
-mimic_global_query_chunk_size: 256
-
-permute: False  # permute labs for corrupting experiments 
-permute_p: 0.5  # fraction of samples to corrupt (fixed mask per split)
-permute_seed: 0  # seed for fixed corruption mask/permutation
-permute_mod: ["labs"]  # any of ["cxr", "ecg", "labs"]

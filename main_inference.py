@@ -40,9 +40,6 @@ def main(cfg) -> None:
     if cfg.ckpt_name != "None":
         ckpt_path = cfg.ckpt_dir
         ckpt_name = cfg.ckpt_name
-        #ckpt_path = f"/sc-projects/sc-proj-ukb-cvd/projects/sigmile-paper/code_cleanup/checkpoints"
-        #addon = "gate_" if cfg.modelname.use_gate else ""
-        #ckpt_name = f"{cfg.modelname.modelname}_{addon}{cfg.dataset_name}_{cfg.split_nr}_{cfg.seed}"
         if os.path.exists(f'{ckpt_path}/{ckpt_name}.ckpt'):
             os.remove(f'{ckpt_path}/{ckpt_name}.ckpt')
         checkpoint_callback = ModelCheckpoint(

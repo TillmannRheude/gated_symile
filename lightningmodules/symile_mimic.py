@@ -36,14 +36,13 @@ class SymileMIMICModel(LightningModuleParent):
             self.gate = ModalityAttentionGate(
                 num_modalities=len(self.modalities),
                 emb_dim=self.emb_dim,
-                num_heads=self.params_method["gate_num_heads"],
                 d_k=self.params_method["gate_d_k"],
-                d_null=self.params_method["gate_d_null"],
                 temperature_init=self.params_method["gate_temp"],
                 gate_bias_init=self.params_method["gate_bias_init"],
                 gate_strength_init=self.params_method["gate_strength_init"],
                 gate_type=self.params_method["gate_type"],
                 gate_mode=self.params_method["gate_mode"],
+                neutral_type=self.params_method["neutral_type"],
             )
         else:
             self.gate = None
@@ -72,11 +71,9 @@ class SymileMIMICModel(LightningModuleParent):
         return self.model(x)
 
     def zeroshot_retrieval(self, split, split_nr, bootstrap=False):
-        mode = self.params_method["mimic_retrieval_mode"]
-
+        mode = "preselected" 
         if mode == "global":
             return self._zeroshot_retrieval_global(split=split, split_nr=split_nr)
-
         return self._zeroshot_retrieval_preselected(split=split, split_nr=split_nr, bootstrap=bootstrap)
 
     def _encode_split_embeddings(self, split: str, split_nr: int):
@@ -213,8 +210,6 @@ class SymileMIMICModel(LightningModuleParent):
 
                     raw = scale_mip_dvs(raw, d=D, M=3)
                     out = self.logit_scale.exp() * raw
-                    if self.modelname == "sigmile" and self.bias is not None:
-                        out = out + self.bias
 
                     logits[qs:qe, cs:ce] = out
 
@@ -258,9 +253,6 @@ class SymileMIMICModel(LightningModuleParent):
                 "pos_prob_mean": float("nan"),
                 "pos_prob_p50": float("nan"),
                 "pos_prob_p95": float("nan"),
-                "auroc_mean": float("nan"),
-                "auroc_p50": float("nan"),
-                "auroc_p95": float("nan"),
             }
 
         keep_q = torch.tensor(keep_q, dtype=torch.long)
@@ -286,12 +278,11 @@ class SymileMIMICModel(LightningModuleParent):
             else:
                 correct_pred_top5 = int(hit.sum().item())
 
-        # diagnostics: rank/margins/auroc (1 pos per query by construction)
+        # diagnostics: rank/margins (1 pos per query by construction)
         ranks = []
         hard_margins = []
         pos_minus_meanneg = []
         pos_probs = []
-        aurocs = []
         for i in range(Bk):
             row = logits[i]
             j = int(pos_idx[i].item())
@@ -308,7 +299,6 @@ class SymileMIMICModel(LightningModuleParent):
                 pos_minus_meanneg.append(float("inf"))
                 rank = 1
             ranks.append(float(rank))
-            aurocs.append(float(self._pairwise_auroc_1pos(pos_logit, neg).item()))
 
             if self.modelname in ["symile", "clip"]:
                 pos_probs.append(torch.nn.functional.softmax(row.unsqueeze(0), dim=1)[0, j].item())
@@ -323,7 +313,6 @@ class SymileMIMICModel(LightningModuleParent):
         margins_t = torch.tensor(hard_margins, dtype=torch.float32)
         pos_minus_meanneg_t = torch.tensor(pos_minus_meanneg, dtype=torch.float32)
         pos_prob_t = torch.tensor(pos_probs, dtype=torch.float32)
-        aurocs_t = torch.tensor(aurocs, dtype=torch.float32)
 
         return {
             "acc@top1": retrieval_acc_top1,
@@ -340,9 +329,6 @@ class SymileMIMICModel(LightningModuleParent):
             "pos_prob_mean": torch.mean(pos_prob_t).item(),
             "pos_prob_p50": torch.quantile(pos_prob_t, 0.5).item(),
             "pos_prob_p95": torch.quantile(pos_prob_t, 0.95).item(),
-            "auroc_mean": torch.mean(aurocs_t).item(),
-            "auroc_p50": torch.quantile(aurocs_t, 0.5).item(),
-            "auroc_p95": torch.quantile(aurocs_t, 0.95).item(),
         }
 
     def _zeroshot_retrieval_preselected(self, split, split_nr, bootstrap=False):
@@ -413,8 +399,6 @@ class SymileMIMICModel(LightningModuleParent):
         hard_margins = []          # pos - max_neg
         pos_minus_meanneg = []     # pos - mean_neg
         candidates_per_query = []
-        aurocs = []
-
 
         # loop through each query sample
         for ix, true_hadm_id in enumerate(query_hadm_id):
@@ -474,8 +458,6 @@ class SymileMIMICModel(LightningModuleParent):
                 raw = torch.cat(raw_chunks, dim=0).unsqueeze(0)  # (1, Nc)
                 logits = scale_mip_dvs(raw, d=D, M=3)
                 logits = self.logit_scale.exp() * logits
-                if self.modelname == "sigmile" and self.bias is not None:
-                    logits = logits + self.bias
 
                 if count_w > 0:
                     mean_w = sum_w / float(count_w)
@@ -496,8 +478,6 @@ class SymileMIMICModel(LightningModuleParent):
             # logits shape: (1, n)
             pos_logit = logits[0, 0]
             neg_logits = logits[0, 1:]
-            auc_q = self._pairwise_auroc_1pos(pos_logit, neg_logits)
-            aurocs.append(auc_q.item())
             if neg_logits.numel() > 0:
                 max_neg = torch.max(neg_logits)
                 mean_neg = torch.mean(neg_logits)
@@ -549,10 +529,6 @@ class SymileMIMICModel(LightningModuleParent):
         retrieval_acc_top1 = correct_pred_top1 / len(query_hadm_id)
         retrieval_acc_top3 = correct_pred_top3 / len(query_hadm_id)
         retrieval_acc_top5 = correct_pred_top5 / len(query_hadm_id)
-        aurocs_t = torch.tensor(aurocs, dtype=torch.float32)
-        auroc_mean = torch.mean(aurocs_t).item()
-        auroc_p50 = torch.quantile(aurocs_t, 0.5).item()
-        auroc_p95 = torch.quantile(aurocs_t, 0.95).item()
 
         # Aggregate diagnostics
         ranks_t = torch.tensor(ranks, dtype=torch.float32)
@@ -599,10 +575,6 @@ class SymileMIMICModel(LightningModuleParent):
             "pos_prob_mean": pos_prob_mean,
             "pos_prob_p50": pos_prob_p50,
             "pos_prob_p95": pos_prob_p95,
-            # AUROC metrics
-            "auroc_mean": auroc_mean,
-            "auroc_p50": auroc_p50,
-            "auroc_p95": auroc_p95,
         }
 
     def get_retrieval_dataset(self, set: str = "val", split_nr: int = 1):
