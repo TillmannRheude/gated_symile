@@ -20,7 +20,11 @@ TODO
 ## Citation
 In case you find our work helpful, we're happy if you cite us as following
 ```bibtex
-@unpublished{Rheude_Eils_Wild_2025, 
-  title={...}, 
-  url={...}
+@unpublished{Rheude_Hegselmann_Eils_Wild_2025, 
+  title={Hidden in the Multiplicative Interaction: Uncovering Fragility in Multimodal Contrastive Learning}, 
+  url={...},
+  publisher={arXiv}, 
+  author={Rheude, Tillmann and Hegselmann, Stefan and Eils, Roland and Wild, Benjamin}, 
+  year={2026},
+  month=march
 }
