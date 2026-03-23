@@ -2,14 +2,14 @@ defaults:
  - plugins: debug
  - _self_
 
-# "/sc-projects/sc-proj-ukb-cvd/projects/data/ukb/cvsplits/splits_0.yaml"
-# "/sc-projects/sc-proj-ukb-cvd/projects/data/ukb/cvsplits/splits_1.yaml"
-# "/sc-projects/sc-proj-ukb-cvd/projects/data/ukb/cvsplits/splits_2.yaml"
-# "/sc-projects/sc-proj-ukb-cvd/projects/data/ukb/cvsplits/splits_3.yaml"
-# "/sc-projects/sc-proj-ukb-cvd/projects/data/ukb/cvsplits/splits_4.yaml"
+# "/path/to/anonymized/splits_0.yaml"
+# "/path/to/anonymized/splits_1.yaml"
+# "/path/to/anonymized/splits_2.yaml"
+# "/path/to/anonymized/splits_3.yaml"
+# "/path/to/anonymized/splits_4.yaml"
 
-splits: /sc-projects/sc-proj-ukb-cvd/projects/data/ukb/cvsplits/splits_0.yaml  # /sc-projects/sc-proj-ukb-cvd/data/3_datasets_post/230216_metabolomics/splits_0.yaml
-#splits: /sc-projects/sc-proj-ukb-cvd/results/projects/22_multimodal/data/240328/splits_51157/split_0.yaml
+splits: /path/to/anonymized/splits_0.yaml  # /path/to/anonymized/splits_0.yaml
+#splits: /path/to/anonymized/split_0.yaml
 train_split: 'train'
 valid_split: 'valid'
 test_split: 'test'

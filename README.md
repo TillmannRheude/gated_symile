@@ -1,6 +1,6 @@
 # Hidden in the Multiplicative Interaction
 
-[![arXiv](https://img.shields.io/badge/arXiv-2512.22991-b31b1b.svg)](https://arxiv.org/pdf/2512.22991)
+[Paper link removed for anonymous review](https://anonymous.invalid/paper)
 
 ## Abstract
 <div align="justify">
@@ -20,7 +20,7 @@ TODO
 ## Citation
 In case you find our work helpful, we're happy if you cite us as following
 ```bibtex
-@unpublished{Rheude_Eils_Wild_2025, 
-  title={...}, 
-  url={...}
+@unpublished{Anonymous_2025, 
+  title={Anonymous submission title}, 
+  url={https://anonymous.invalid/paper}
 }

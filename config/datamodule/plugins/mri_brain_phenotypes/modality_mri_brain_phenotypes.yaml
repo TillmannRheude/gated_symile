@@ -1,9 +1,9 @@
 name: TabularPlugin
 init: _init_ 
 
-data_paths: ["/sc-projects/sc-proj-ukb-cvd/data/2_datasets_pre/230310_brain_mri/231021_bmri_phenotypes_scaled.feather"]
+data_paths: ["/path/to/anonymized/231021_bmri_phenotypes_scaled.feather"]
 
-eid_map_path: "/sc-projects/sc-proj-ukb-cvd/data/2_datasets_pre/230315_metabolomics_2/mapping/mapping_combined.txt"
+eid_map_path: "/path/to/anonymized/mapping_combined.txt"
 eid_map_from: 'EID.49966'
 eid_map_to: 'EID.44448' #clangenberg
 #eid_map_to: 'EID.51157'

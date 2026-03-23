@@ -1,9 +1,9 @@
 name: TabularPlugin
 init: _init_ 
 
-data_paths: ["/sc-resources/ukb/data/shared/reils-clangenberg/metabolomics/phase3/240604_nmr_combined_phase_3_mean_norm_by_spectrometer_imputed.feather"]
+data_paths: ["/path/to/anonymized/240604_nmr_combined_phase_3_mean_norm_by_spectrometer_imputed.feather"]
 
-eid_map_path: "/sc-resources/ukb/data/shared/reils-clangenberg/metabolomics/mapping_combined.txt"
+eid_map_path: "/path/to/anonymized/mapping_combined.txt"
 eid_map_from: 'EID.30418' # nightingale
 eid_map_to: 'EID.44448' #clangenberg
 

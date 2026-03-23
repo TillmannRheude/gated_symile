@@ -158,7 +158,7 @@ class TextEncoder(nn.Module):
 
 
     def forward(self, x):
-        # https://github.com/huggingface/transformers/blob/a0857740c0e6127485c11476650314df3accc2b6/src/transformers/modeling_utils.py#L941
+        # Upstream implementation reference removed for anonymous review
         # attention mask has shape (batch_sz, seq_len)
         # we make the mask broadcastable to (batch_sz, num_heads, seq_len, seq_len)
         extended_attention_mask = x["attention_mask"][:, None, None, :]

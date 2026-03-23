@@ -7,7 +7,7 @@ from torch.utils.data import Dataset
 class Dataset_SymileMimic(Dataset):
     def __init__(
         self,
-        data_dir: str = "/sc-resources/dh-mimic/mimic_symile/original_data_and_splits/",
+        data_dir: str = "/path/to/anonymized/original_data_and_splits",
         split: str = "train",
         split_nr: int = 0,
     ):

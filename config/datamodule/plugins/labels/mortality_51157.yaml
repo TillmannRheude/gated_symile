@@ -1,8 +1,8 @@
 name: TabularPlugin
 init: _init_ 
 
-data_paths: ["/sc-projects/sc-proj-ukb-cvd/projects/data/ukb/mortality_labels_10y.feather"]
+data_paths: ["/path/to/anonymized/mortality_labels_10y.feather"]
 
-eid_map_path: "/sc-projects/sc-proj-ukb-cvd/data/2_datasets_pre/230315_metabolomics_2/mapping/mapping_combined.txt"
+eid_map_path: "/path/to/anonymized/mapping_combined.txt"
 eid_map_from: 'EID.49966'
 eid_map_to: 'EID.51157' #clangenberg

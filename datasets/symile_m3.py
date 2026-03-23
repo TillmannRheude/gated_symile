@@ -44,7 +44,7 @@ def get_language_constant(num_langs):
 class Dataset_SymileM3(Dataset):
     def __init__(
         self, 
-        data_dir: str = "/scratch/usr/bemrhtil/data/symile/m3-5-m/tensors",
+        data_dir: str = "/path/to/anonymized/tensors",
         split: str = "train",
         split_nr: int = 0,
         text_model_id: str = "xlm-roberta-large",
