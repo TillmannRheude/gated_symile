@@ -1,8 +1,0 @@
-name: TabularPlugin
-init: _init_ 
-
-data_paths: ["/path/to/anonymized/250729_ehr_qwen_baseline.feather"]
-
-eid_map_path: "/path/to/anonymized/mapping_combined.txt"
-eid_map_from: 'EID.49966'
-eid_map_to: 'EID.44448' #clangenberg
