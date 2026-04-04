@@ -93,13 +93,6 @@ def symile_gated(
             W_pair = gate.compute_W(pair_embs)
             gated_list, _, _ = gate.apply_for_target(t, pair_embs, W=W_pair)
 
-            # distillation loss 
-            g0 = gated_list[0].view(B, KK, D)[:, 0, :].detach()
-            g1 = gated_list[1].view(B, KK, D)[:, 0, :].detach()
-            g2 = gated_list[2].view(B, KK, D)[:, 0, :].detach()
-
-            distill = (F.mse_loss(r_a, g0) + F.mse_loss(r_b, g1) + F.mse_loss(r_c, g2)) / 3.0
-
             # symile score for target t: dot( cand_t , Π_{m!=t} gated_m )
             prod = torch.ones_like(gated_list[0])
             for m in range(3):
@@ -117,7 +110,7 @@ def symile_gated(
                 logits = logits + bias  # safe no-op for symile
 
             y = torch.zeros((B,), device=r_a.device, dtype=torch.long)  # positive at column 0
-            return F.cross_entropy(logits, y) + (0.1 * distill)
+            return F.cross_entropy(logits, y)
 
         loss_a = _loss_for_target(0)
         loss_b = _loss_for_target(1)
