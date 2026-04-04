@@ -17,6 +17,8 @@ from lightningmodules.synthetic_xnor import SyntheticXNORModel
 
 # Architecture 
 from architecture import Contrastive_Model
+from architecture import CoMM_Model
+from architecture import TransformerSymile_Model
 from encoders import (
     CXREncoder, ECGEncoder, LabsEncoder,  # symile_mimic
     AudioEncoder, ImageEncoder, TextEncoder,  # symile_m3
@@ -67,6 +69,12 @@ def build_model(cfg: dict):
             LabsEncoder(emb_dim=cfg["modelname"]["emb_dim"]),
         ])
         model = Contrastive_Model(encoders=encoders)
+        if cfg["modelname"]["modelname"] == "symile_attention":
+            model = TransformerSymile_Model(
+                contrastive_model=model,
+                transformer_params=cfg["modelname"]["transformer_params"],
+                proj_output_dim=1,
+            )
 
         return SymileMIMICModel(
             params_optimizer=params_optimizer,
@@ -137,6 +145,12 @@ def build_model(cfg: dict):
                 )
             )
         model = Contrastive_Model(encoders=encoders)
+        if cfg["modelname"]["modelname"] == "symile_attention":
+            model = TransformerSymile_Model(
+                contrastive_model=model,
+                transformer_params=cfg["modelname"]["transformer_params"],
+                proj_output_dim=1,
+            )
 
         return UKBModel(
             params_optimizer=params_optimizer,
@@ -165,6 +179,18 @@ def build_model(cfg: dict):
             ),
         ])
         model = Contrastive_Model(encoders=encoders)
+        if cfg["modelname"]["modelname"] == "symile_attention":
+            model = TransformerSymile_Model(
+                contrastive_model=model,
+                transformer_params=cfg["modelname"]["transformer_params"],
+                proj_output_dim=1,
+            )
+        if cfg["modelname"]["modelname"] == "comm":
+            model = CoMM_Model(
+                contrastive_model=model,
+                transformer_params=cfg["modelname"]["transformer_params"],
+                # augmentation_params=cfg["modelname"]["augmentation_params"],
+            )
         return SyntheticXNORModel(
             params_optimizer=params_optimizer,
             params_method=params_method,

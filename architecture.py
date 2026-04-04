@@ -3,6 +3,7 @@ import math
 import torch.nn as nn
 import torch.nn.functional as F
 
+from utils import mimetic_init_svd_
 
 class ModalityAttentionGate(nn.Module):
     def __init__(
@@ -190,8 +191,8 @@ class ModalityAttentionGate(nn.Module):
             G = F.normalize(G, dim=2, eps=self.eps)
 
         gated_list = [G[:, m, :] for m in range(self.M)]
-        self._maybe_save_pca_plot(target_idx=int(target_idx), embeddings=embeddings, gated_list=gated_list, w=w)
         return gated_list, w, W
+
 
 class Contrastive_Model(nn.Module):
     def __init__(
@@ -208,4 +209,247 @@ class Contrastive_Model(nn.Module):
         embeddings = [self.encoders[i](x[i]) for i in range(len(x))]
         return {
             "embeddings": embeddings
+        }
+
+
+class TransformerSymile(nn.Module):
+    def __init__(
+        self,
+        transformer_params: dict = {
+            "d_model": 256,
+            "nhead": 2,
+            "num_layers": 2,
+            "dropout": 0.0,
+        },
+        proj_output_dim: int = 1,
+        max_modalities: int = 3,
+    ):
+        super().__init__()
+        d_model = transformer_params["d_model"]
+        self.max_modalities = int(max_modalities)
+        
+        # learned modality/type embeddings
+        self.modality_embedding = nn.Parameter(
+            torch.zeros(1, self.max_modalities, d_model)
+        )
+
+        # small per-modality projections to break exchangeability
+        self.modality_projs = nn.ModuleList([
+            nn.Linear(d_model, d_model) for _ in range(self.max_modalities)
+        ])
+
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=transformer_params["nhead"],
+            dim_feedforward=d_model * 4,
+            dropout=transformer_params["dropout"],
+            batch_first=True,
+            norm_first=True,
+            activation="gelu",
+        )
+        self.transformer = nn.TransformerEncoder(
+            encoder_layer,
+            num_layers=transformer_params["num_layers"],
+        )
+
+        # scorer on flattened token outputs
+        self.proj_head = nn.Sequential(
+            nn.LayerNorm(d_model * self.max_modalities),
+            nn.Linear(d_model * self.max_modalities, d_model),
+            nn.GELU(),
+            nn.Linear(d_model, proj_output_dim),
+        )
+        # residual linear shortcut
+        self.residual_linear = nn.Linear(
+            d_model * self.max_modalities, proj_output_dim
+        )
+
+        self.apply(self._init_weights)
+        #self.cls_token = nn.Parameter(torch.zeros(1, 1, d_model))
+        #nn.init.normal_(self.cls_token, mean=0.0, std=0.02)
+        #self.reg_token = nn.Parameter(torch.zeros(1, 1, d_model))
+        #nn.init.normal_(self.reg_token, mean=0.0, std=0.02)
+        nn.init.normal_(self.modality_embedding, mean=0.0, std=0.02)
+
+    def _init_weights(self, m) -> None:
+        if isinstance(m, nn.LayerNorm):
+            nn.init.ones_(m.weight)
+            nn.init.zeros_(m.bias)
+        elif isinstance(m, nn.Linear):
+            nn.init.xavier_uniform_(m.weight)
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+            # kaiming breaks it 
+            #torch.nn.init.kaiming_normal_(m.weight, mode="fan_out") 
+            #if m.bias is not None:
+            #    torch.nn.init.zeros_(m.bias)
+        elif isinstance(m, nn.Conv2d):
+            nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+        elif isinstance(m, nn.BatchNorm2d):
+            nn.init.ones_(m.weight)
+            nn.init.zeros_(m.bias)
+
+    def forward(
+        self,
+        embeddings: list[torch.Tensor],
+    ):
+        # per-modality projections
+        tokens = torch.stack(
+            [self.modality_projs[m](embeddings[m]) for m in range(self.max_modalities)],
+            dim=1,
+        )  # [B, M, D]
+
+        # explicit modality identity
+        tokens = tokens + self.modality_embedding[:, :self.max_modalities, :].to(
+            device=tokens.device, dtype=tokens.dtype
+        )
+
+        transformer_output = self.transformer(tokens)   # [B, M, D]
+
+        z = torch.flatten(transformer_output, start_dim=1)  # [B, M*D]
+
+        z_mlp = self.proj_head(z)
+        z_res = self.residual_linear(z)
+
+        z = z_mlp + z_res
+        return z
+
+class TransformerSymile_Model(nn.Module):
+    def __init__(
+        self,
+        contrastive_model: Contrastive_Model = Contrastive_Model(),
+        transformer_params: dict = {
+            "d_model": 256,
+            "nhead": 2,
+            "num_layers": 2,
+        },
+        proj_output_dim: int = 1,
+    ):
+        super().__init__()
+        self.transformer = TransformerSymile(
+            transformer_params=transformer_params,
+            proj_output_dim=proj_output_dim,
+        )
+        self.contrastive_model = contrastive_model
+
+    def forward(
+        self,
+        x: list = [torch.Tensor, torch.Tensor, torch.Tensor],
+    ):
+        embeddings = self.contrastive_model(x)["embeddings"]
+        z = self.transformer(embeddings)
+        return {
+            "embeddings": embeddings,
+            "z": z,
+        }
+
+
+class CoMMTransformer(nn.Module):
+    def __init__(
+        self,
+        transformer_params: dict = {
+            "d_model": 256,
+            "nhead": 2,
+            "dropout": 0.0,
+            "num_layers": 2,
+        },
+    ):
+        super().__init__()
+
+        transformer_layers = nn.TransformerEncoderLayer(
+            d_model=transformer_params["d_model"],
+            nhead=transformer_params["nhead"],
+            dim_feedforward=transformer_params["d_model"] * 4,
+            dropout=transformer_params["dropout"],
+            batch_first=True,
+        )
+        self.transformer = nn.TransformerEncoder(
+            transformer_layers,
+            num_layers=transformer_params["num_layers"],
+        )
+
+    def forward(
+        self,
+        embeddings: list[torch.Tensor],
+    ):
+        stacked_embeddings = torch.stack(embeddings, dim=1)
+        transformer_output = self.transformer(stacked_embeddings)
+        z = transformer_output.mean(dim=1)
+        return z
+
+class CoMM_Model(nn.Module):
+    def __init__(
+        self,
+        contrastive_model: Contrastive_Model = Contrastive_Model(),
+        transformer_params: dict = {
+            "d_model": 256,
+            "nhead": 2,
+            "num_layers": 2,
+            "dropout": 0.0,
+        },
+        augmentation_params: dict = {
+            "feature_dropout": 0.1,
+            "modality_dropout": 0.0,
+            "noise_std": 0.0,
+        },
+    ):
+        super().__init__()
+        self.contrastive_model = contrastive_model
+        self.transformer = CoMMTransformer(transformer_params=transformer_params)
+        self.augmentation_params = augmentation_params
+
+    def _sample_modality_dropout_mask(self, batch_size: int, num_modalities: int, device, dtype):
+        keep_prob = 1.0 - float(self.augmentation_params.get("modality_dropout", 0.0))
+        mask = (torch.rand(batch_size, num_modalities, device=device) < keep_prob).to(dtype=dtype)
+
+        empty = mask.sum(dim=1) == 0
+        if empty.any():
+            rand_idx = torch.randint(0, num_modalities, (int(empty.sum().item()),), device=device)
+            mask[empty] = 0.0
+            mask[empty, rand_idx] = 1.0
+
+        return mask
+
+    def _augment_embeddings(self, embeddings: list[torch.Tensor]) -> list[torch.Tensor]:
+        if len(embeddings) == 0:
+            raise ValueError("CoMM_Model requires at least one modality embedding.")
+
+        batch_size = embeddings[0].shape[0]
+        num_modalities = len(embeddings)
+        device = embeddings[0].device
+        dtype = embeddings[0].dtype
+
+        modality_mask = self._sample_modality_dropout_mask(batch_size, num_modalities, device, dtype)
+        feature_dropout = float(self.augmentation_params.get("feature_dropout", 0.1))
+        noise_std = float(self.augmentation_params.get("noise_std", 0.0))
+
+        augmented = []
+        for idx, emb in enumerate(embeddings):
+            x = emb
+            if feature_dropout > 0.0:
+                x = F.dropout(x, p=feature_dropout, training=self.training)
+            if noise_std > 0.0:
+                x = x + (noise_std * torch.randn_like(x))
+            x = x * modality_mask[:, idx].unsqueeze(1)
+            augmented.append(x)
+
+        return augmented
+
+    def forward(
+        self,
+        x: list = [torch.Tensor, torch.Tensor, torch.Tensor],
+    ):
+        embeddings = self.contrastive_model(x)["embeddings"]
+        embeddings_view1 = self._augment_embeddings(embeddings)
+        embeddings_view2 = self._augment_embeddings(embeddings)
+
+        z1 = self.transformer(embeddings_view1)
+        z2 = self.transformer(embeddings_view2)
+        
+        return {
+            "embeddings": embeddings,
+            "z_view1": z1,
+            "z_view2": z2,
         }

@@ -47,6 +47,14 @@ class UKBModel(LightningModuleParent):
 
         self.save_hyperparameters()
 
+    def _get_encoder_stack(self):
+        encoders = getattr(self.model, "encoders", None)
+        if encoders is None and hasattr(self.model, "contrastive_model"):
+            encoders = self.model.contrastive_model.encoders
+        if encoders is None:
+            raise ValueError("Could not locate encoder stack for UKBModel.")
+        return encoders
+
     @staticmethod
     def _modality_present(x: torch.Tensor) -> torch.Tensor:
         """
@@ -99,6 +107,7 @@ class UKBModel(LightningModuleParent):
     def build_candidate_bank(self, split):
         r_list, cls_list = [], []
         dl = self.trainer.datamodule.val_dataloader() if split == "val" else self.trainer.datamodule.test_dataloader()
+        encoder_stack = self._get_encoder_stack()
 
         for batch in dl:
             mods = self._get_modalities(batch)
@@ -110,7 +119,7 @@ class UKBModel(LightningModuleParent):
                 continue
 
             candidates = candidates_raw[present_cand].float() 
-            reps = self.model.encoders[self.candidate_idx](candidates)
+            reps = encoder_stack[self.candidate_idx](candidates)
             if self.params_method.get("embedding_norm", False):
                 reps = torch.nn.functional.normalize(reps, dim=1)
 
@@ -313,16 +322,55 @@ class UKBModel(LightningModuleParent):
 
             rep_list = [gated_list[i] for i in query_indices]
         else:
+            emb_keep = [embeddings[i][keep] for i in range(len(embeddings))]
             rep_list = [embeddings[i][keep] for i in query_indices]  # list of (B_keep, D)
 
         r_candidates = bank["r"]
-        logits = zeroshot_retrieval_logits(
-            r_candidates,
-            rep_list,
-            self.logit_scale.exp(),
-            bias=self.bias,
-            modelname=self.modelname,
-        )
+        if self.modelname == "symile_attention":
+            Bk = emb_keep[0].shape[0]
+            if Bk == 0:
+                return []
+            D = emb_keep[0].shape[1]
+            M_total = len(emb_keep)
+            candidate_chunk_size = int(self.params_method.get("gate_candidate_chunk_size", 256))
+            logits_chunks = []
+
+            for s in range(0, r_candidates.shape[0], candidate_chunk_size):
+                cand = r_candidates[s : s + candidate_chunk_size]  # (Nc, D)
+                Nc = cand.shape[0]
+
+                pair_embs = []
+                for m in range(M_total):
+                    if m == self.candidate_idx:
+                        x = cand.unsqueeze(0).expand(Bk, Nc, D).reshape(Bk * Nc, D)
+                    else:
+                        x0 = emb_keep[m]  # (Bk, D)
+                        x = x0.unsqueeze(1).expand(Bk, Nc, D).reshape(Bk * Nc, D)
+                    pair_embs.append(x)
+
+                z = self.model.transformer(pair_embs)
+                if z.dim() == 2 and z.shape[1] == 1:
+                    z = z.squeeze(1)
+                elif z.dim() != 1:
+                    raise ValueError(
+                        f"Expected transformer score shape (Bk*Nc,) or (Bk*Nc,1), got {tuple(z.shape)}"
+                    )
+
+                logits_chunk = z.view(Bk, Nc)
+                logits_chunks.append(logits_chunk)
+
+            logits = torch.cat(logits_chunks, dim=1)
+            logits = logits * self.logit_scale.exp()
+            if self.bias is not None:
+                logits = logits + self.bias
+        else:
+            logits = zeroshot_retrieval_logits(
+                r_candidates,
+                rep_list,
+                self.logit_scale.exp(),
+                bias=self.bias,
+                modelname=self.modelname,
+            )
 
         y = torch.tensor(batch["eids"]).to(self.device)[keep]
         r_cls_id = bank["cls_id"]
