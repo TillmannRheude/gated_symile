@@ -13,15 +13,15 @@ candidate_idx: 2
 
 nmr:
   mlp:
-    hidden_dims: [1024, 512, 256]
+    hidden_dims: [1024,2048,4096]
     hidden_dropouts: [0.2, 0.2, 0.2]
 ehr:
   mlp:
-    hidden_dims: [2048, 1024, 512]
+    hidden_dims: [1024,2048,4096]
     hidden_dropouts: [0.6, 0.6, 0.6]
 olink:
   mlp:
-    hidden_dims: [1024, 512, 256]
+    hidden_dims: [1024,2048,4096]
     hidden_dropouts: [0.2, 0.2, 0.2]
 prs:
   mlp:

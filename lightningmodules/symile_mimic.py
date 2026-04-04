@@ -141,10 +141,6 @@ class SymileMIMICModel(LightningModuleParent):
         query_r_l = enc["r_l"]
         query_id = enc["hadm_id"]
 
-        #Nc = cand_r_c.shape[0]
-        #print(f"[MIMIC global] N_candidates={Nc}, chance≈{1.0/Nc:.6g}")
-
-
         use_gate = getattr(self, "use_gate", False) and getattr(self, "gate", None) is not None
         gate_mode = getattr(self.gate, "gate_mode", None) if use_gate else None
         cand_dep_gate = bool(
@@ -213,6 +209,43 @@ class SymileMIMICModel(LightningModuleParent):
 
                     logits[qs:qe, cs:ce] = out
 
+            logits = logits.cpu()
+        elif self.modelname == "symile_attention":
+            Bq, D = query_r_e.shape
+            Nc = cand_r_c.shape[0]
+            logits = torch.empty((Bq, Nc), device=self.device, dtype=torch.float32)
+
+            q_chunk = int(self.params_method.get("mimic_global_query_chunk_size", 64))
+            c_chunk = int(self.params_method.get("gate_candidate_chunk_size", 256))
+
+            for qs in range(0, Bq, q_chunk):
+                qe = min(Bq, qs + q_chunk)
+                ecg_q = query_r_e[qs:qe]
+                labs_q = query_r_l[qs:qe]
+                Bk = ecg_q.shape[0]
+
+                for cs in range(0, Nc, c_chunk):
+                    ce = min(Nc, cs + c_chunk)
+                    cand = cand_r_c[cs:ce]
+                    Nc_k = cand.shape[0]
+
+                    pair_embs = [
+                        cand.unsqueeze(0).expand(Bk, Nc_k, D).reshape(Bk * Nc_k, D),
+                        ecg_q.unsqueeze(1).expand(Bk, Nc_k, D).reshape(Bk * Nc_k, D),
+                        labs_q.unsqueeze(1).expand(Bk, Nc_k, D).reshape(Bk * Nc_k, D),
+                    ]
+
+                    z = self.model.transformer(pair_embs)
+                    if z.dim() == 2 and z.shape[1] == 1:
+                        z = z.squeeze(1)
+                    elif z.dim() != 1:
+                        raise ValueError(f"Expected transformer score shape (Bk*Nc_k,) or (Bk*Nc_k,1), got {tuple(z.shape)}")
+
+                    out = self.logit_scale.exp() * z.view(Bk, Nc_k)
+                    if self.bias is not None:
+                        out = out + self.bias
+
+                    logits[qs:qe, cs:ce] = out
             logits = logits.cpu()
         else:
             logits = zeroshot_retrieval_logits(
@@ -465,6 +498,21 @@ class SymileMIMICModel(LightningModuleParent):
                     self.log("val/gate_labs_mean", mean_w[2], on_step=False, on_epoch=True, sync_dist=True)
 
                 logits = logits.cpu()
+            elif self.modelname == "symile_attention":
+                Nc, D = r_c.shape
+                ecg = r_e.unsqueeze(0).expand(Nc, D)
+                labs = r_l.unsqueeze(0).expand(Nc, D)
+
+                z = self.model.transformer([r_c, ecg, labs])
+                if z.dim() == 2 and z.shape[1] == 1:
+                    z = z.squeeze(1)
+                elif z.dim() != 1:
+                    raise ValueError(f"Expected transformer score shape (Nc,) or (Nc,1), got {tuple(z.shape)}")
+
+                logits = (self.logit_scale.exp() * z.unsqueeze(0))
+                if self.bias is not None:
+                    logits = logits + self.bias
+                logits = logits.cpu()
             else:
                 logits = zeroshot_retrieval_logits(
                     r_c,
@@ -493,7 +541,7 @@ class SymileMIMICModel(LightningModuleParent):
             ranks.append(float(rank))
 
             # Also collect a unified positive softmax probability for comparability
-            if self.modelname in ["symile", "clip"]:
+            if self.modelname in ["symile", "clip", "symile_attention"]:
                 pos_probs.append(torch.nn.functional.softmax(logits, dim=1)[0, 0].item())
             else:   
                 # Sigmoid family: independent probabilities per candidate

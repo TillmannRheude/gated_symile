@@ -1,0 +1,26 @@
+modelname: symile_attention
+
+emb_dim: 256
+
+negative_sampling: pair  # n_squared, pair
+logit_scale_init: 0
+embedding_norm: True
+
+transformer_params:
+  d_model: 256
+  nhead: 2
+  num_layers: 2
+  dropout: 0.0
+
+pair_num_negatives: 128  # number of negatives for pair sampling, 
+
+use_gate: False
+use_null: True
+renormalize: True
+gate_temp: 0.7
+gate_bias_init: 0.0
+gate_type: "sigmoid"
+gate_mode: "attention"  # matrix, attention
+neutral_type: "random_trainable"  # ones, random_frozen, random_trainable
+gate_strength_init: -3.0
+gate_d_k: 256

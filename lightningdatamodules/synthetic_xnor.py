@@ -85,7 +85,7 @@ class DataModule_SyntheticXNOR(pl.LightningDataModule):
             self.ds_val, batch_size=self.batch_size,
             shuffle=False,
             num_workers=self.num_workers,
-            drop_last=False,
+            drop_last=True,
         )
 
     def test_dataloader(self):
@@ -93,5 +93,5 @@ class DataModule_SyntheticXNOR(pl.LightningDataModule):
             self.ds_test, batch_size=self.batch_size,
             shuffle=False,
             num_workers=self.num_workers,
-            drop_last=False,
+            drop_last=True,
         )

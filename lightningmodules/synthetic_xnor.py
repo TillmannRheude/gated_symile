@@ -133,13 +133,41 @@ class SyntheticXNORModel(LightningModuleParent):
 
             rep_list = [gated_list[1], gated_list[2]]
 
-        logits = zeroshot_retrieval_logits(
-            r_a,
-            rep_list,
-            self.logit_scale.exp(),
-            bias=self.bias,
-            modelname=self.modelname,
-        )
+        if self.modelname == "symile_attention":
+            B = int(r_a.shape[0])
+            D = int(r_a.shape[1])
+
+            # Build all query-candidate triplets:
+            # row i = query (B_i, C_i), column j = candidate A_j
+            a_pair = r_a[None, :, :].expand(B, B, D).reshape(B * B, D)   # candidates A_j
+            b_pair = r_b[:, None, :].expand(B, B, D).reshape(B * B, D)   # query B_i
+            c_pair = r_c[:, None, :].expand(B, B, D).reshape(B * B, D)   # query C_i
+
+            # TransformerSymile expects a list of modality embeddings and returns one score per triplet
+            z = self.model.transformer([a_pair, b_pair, c_pair])
+
+            if z.dim() == 2 and z.shape[1] == 1:
+                z = z.squeeze(1)
+            elif z.dim() != 1:
+                raise ValueError(f"Expected transformer score shape (B*B,) or (B*B,1), got {tuple(z.shape)}")
+
+            logits = z.view(B, B)
+            # logits = self.logit_scale.exp() * logits
+
+            if self.bias is not None:
+                logits = logits + self.bias
+
+            pred = torch.argmax(logits, dim=1)
+            y = torch.arange(B, device=pred.device, dtype=pred.dtype)
+            return (pred == y).float().tolist()
+        else:
+            logits = zeroshot_retrieval_logits(
+                r_a,
+                rep_list,
+                self.logit_scale.exp(),
+                bias=self.bias,
+                modelname=self.modelname,
+            )
         pred = torch.argmax(logits, dim=1)
         y = torch.arange(r_a.shape[0], device=pred.device, dtype=pred.dtype)
         return (pred == y).float().tolist()

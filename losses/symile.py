@@ -26,6 +26,72 @@ def compute_logits_neg_sampling_n_squared(x, y, z):
     logits = x @ y_z.T
     return logits
 
+
+def symile_attention(
+    r_a,
+    r_b,
+    r_c,
+    logit_scale,
+    negative_sampling=None,
+    bias=None,
+    labels=None,
+    candidates=None,
+    pair_num_negatives=None,
+    **kwargs,
+):
+    """
+    Symile-style objective that uses a model-produced scalar compatibility score
+    `z` instead of the analytic multilinear inner product.
+
+    Expected usage:
+      - pass the learned score tensor via `kwargs["z"]`
+      - for pair sampling / candidate-dependent training, `z` should have shape
+        (B, K+1) with the positive in col 0
+      - for full candidate scoring, `z` can have shape (B, C) where positives
+        are specified by `labels` or lie on the diagonal if `labels is None`
+
+    Notes:
+      - `r_a`, `r_b`, and `r_c` are accepted for API compatibility but are not
+        used directly once `z` is provided
+    """
+    z = kwargs.get("z", None)
+    if z is None:
+        raise ValueError("symile_attention(...) requires a model-produced `z` in kwargs.")
+
+    logits = z
+    if logits.dim() == 1:
+        logits = logits.unsqueeze(1)
+    if logits.dim() != 2:
+        raise ValueError(f"`z` must have shape (B,), (B,1), or (B,C); got {tuple(logits.shape)}")
+
+    logits = logit_scale * logits
+
+    if bias is not None:
+        logits = logits + bias
+
+    if negative_sampling == "pair":
+        if logits.shape[1] < 2:
+            raise ValueError(
+                "symile_attention with `negative_sampling='pair'` requires `z` to contain "
+                "at least one positive and one negative column."
+            )
+        y = torch.zeros((logits.shape[0],), device=logits.device, dtype=torch.long)
+        return F.cross_entropy(logits, y)
+
+    if logits.shape[1] < 2:
+        raise ValueError(
+            "symile_attention requires `z` with at least 2 candidate columns for non-pair contrastive training."
+        )
+
+    if labels is None:
+        if logits.shape[0] != logits.shape[1]:
+            raise ValueError(
+                "When `labels` is None, symile_attention expects square logits so positives lie on the diagonal."
+            )
+        labels = torch.arange(logits.shape[0], device=logits.device)
+
+    return F.cross_entropy(logits, labels)
+
 def symile_gated(
     r_a, r_b, r_c,
     logit_scale,
