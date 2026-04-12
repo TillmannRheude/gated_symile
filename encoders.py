@@ -228,6 +228,8 @@ class CXREncoder(nn.Module):
             in_channels=3,
             emb_dim=emb_dim,
         )
+        self.residual_attn = nn.Linear(emb_dim, 1, bias=False)
+        self.residual_norm = nn.LayerNorm(emb_dim)
         nn.init.kaiming_normal_(self.resnet.fc.weight, mode="fan_out")
         nn.init.zeros_(self.resnet.fc.bias)
         self.apply(self._init_weights)
@@ -263,8 +265,9 @@ class CXREncoder(nn.Module):
     def forward(self, x):
         strong = self.resnet(x)
         residual_tokens = self.residual_branch(x)
-        residual = residual_tokens.mean(dim=1)
-        return strong + residual
+        attn = torch.softmax(self.residual_attn(residual_tokens).squeeze(-1), dim=1)
+        residual = torch.sum(residual_tokens * attn.unsqueeze(-1), dim=1)
+        return self.residual_norm(strong + residual)
 
 class ECGEncoder(nn.Module):
     def __init__(
@@ -288,6 +291,8 @@ class ECGEncoder(nn.Module):
             in_channels=1,
             emb_dim=emb_dim,
         )
+        self.residual_attn = nn.Linear(emb_dim, 1, bias=False)
+        self.residual_norm = nn.LayerNorm(emb_dim)
         nn.init.kaiming_normal_(self.resnet.fc.weight, mode="fan_out")
         nn.init.zeros_(self.resnet.fc.bias)
         nn.init.kaiming_normal_(self.resnet.conv1.weight, mode="fan_out")
@@ -324,8 +329,9 @@ class ECGEncoder(nn.Module):
     def forward(self, x):
         strong = self.resnet(x)
         residual_tokens = self.residual_branch(x)
-        residual = residual_tokens.mean(dim=1)
-        return strong + residual
+        attn = torch.softmax(self.residual_attn(residual_tokens).squeeze(-1), dim=1)
+        residual = torch.sum(residual_tokens * attn.unsqueeze(-1), dim=1)
+        return self.residual_norm(strong + residual)
 
 class LabsEncoder(nn.Module):
     def __init__(
@@ -337,6 +343,7 @@ class LabsEncoder(nn.Module):
         self.emb_dim = emb_dim
 
         self.residual_proj = nn.Linear(self.input_dim, emb_dim)
+        self.residual_norm = nn.LayerNorm(emb_dim)
         self.mlp = nn.Sequential(
             nn.Linear(self.input_dim, emb_dim),
             nn.ReLU(),
@@ -391,7 +398,7 @@ class LabsEncoder(nn.Module):
             )
 
     def forward(self, x):
-        return self.residual_proj(x) + self.mlp(x)
+        return self.residual_norm(self.residual_proj(x) + self.mlp(x))
 
 
 
