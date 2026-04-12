@@ -70,6 +70,17 @@ class SymileMIMICModel(LightningModuleParent):
         ]
         return self.model(x)
 
+    @staticmethod
+    def _ensure_single_seq(x: torch.Tensor) -> torch.Tensor:
+        """
+        Convert a single example from shape (D,) or (T, D) to (T, D).
+        """
+        if x.ndim == 1:
+            return x[None, :]
+        if x.ndim == 2:
+            return x
+        raise ValueError(f"Expected a single example of shape (D,) or (T,D), got {tuple(x.shape)}")
+
     def zeroshot_retrieval(self, split, split_nr, bootstrap=False):
         mode = "preselected" 
         if mode == "global":
@@ -103,9 +114,9 @@ class SymileMIMICModel(LightningModuleParent):
         hadm_id = torch.cat(hadm_id, dim=0)
 
         if self.params_method["embedding_norm"]:
-            r_c = nn.functional.normalize(r_c, dim=1)
-            r_e = nn.functional.normalize(r_e, dim=1)
-            r_l = nn.functional.normalize(r_l, dim=1)
+            r_c = nn.functional.normalize(r_c, dim=-1)
+            r_e = nn.functional.normalize(r_e, dim=-1)
+            r_l = nn.functional.normalize(r_l, dim=-1)
 
         return {"r_c": r_c, "r_e": r_e, "r_l": r_l, "hadm_id": hadm_id}
 
@@ -211,7 +222,8 @@ class SymileMIMICModel(LightningModuleParent):
 
             logits = logits.cpu()
         elif self.modelname == "symile_attention":
-            Bq, D = query_r_e.shape
+            Bq = query_r_e.shape[0]
+            D = query_r_e.shape[-1]
             Nc = cand_r_c.shape[0]
             logits = torch.empty((Bq, Nc), device=self.device, dtype=torch.float32)
 
@@ -220,19 +232,23 @@ class SymileMIMICModel(LightningModuleParent):
 
             for qs in range(0, Bq, q_chunk):
                 qe = min(Bq, qs + q_chunk)
-                ecg_q = query_r_e[qs:qe]
-                labs_q = query_r_l[qs:qe]
+                ecg_q = self._ensure_seq(query_r_e[qs:qe])    # (Bk, T_b, D)
+                labs_q = self._ensure_seq(query_r_l[qs:qe])   # (Bk, T_c, D)
                 Bk = ecg_q.shape[0]
 
                 for cs in range(0, Nc, c_chunk):
                     ce = min(Nc, cs + c_chunk)
-                    cand = cand_r_c[cs:ce]
+                    cand = self._ensure_seq(cand_r_c[cs:ce])  # (Nc_k, T_a, D)
                     Nc_k = cand.shape[0]
 
+                    Ta = cand.shape[1]
+                    Tb = ecg_q.shape[1]
+                    Tc = labs_q.shape[1]
+
                     pair_embs = [
-                        cand.unsqueeze(0).expand(Bk, Nc_k, D).reshape(Bk * Nc_k, D),
-                        ecg_q.unsqueeze(1).expand(Bk, Nc_k, D).reshape(Bk * Nc_k, D),
-                        labs_q.unsqueeze(1).expand(Bk, Nc_k, D).reshape(Bk * Nc_k, D),
+                        cand.unsqueeze(0).expand(Bk, Nc_k, Ta, D).reshape(Bk * Nc_k, Ta, D),
+                        ecg_q.unsqueeze(1).expand(Bk, Nc_k, Tb, D).reshape(Bk * Nc_k, Tb, D),
+                        labs_q.unsqueeze(1).expand(Bk, Nc_k, Tc, D).reshape(Bk * Nc_k, Tc, D),
                     ]
 
                     z = self.model.transformer(pair_embs)
@@ -452,9 +468,14 @@ class SymileMIMICModel(LightningModuleParent):
 
             # Candidate-dependent gate: gate the query modalities (ecg,labs) conditioned on each candidate CXR.
             if cand_dep_gate:
-                Nc, D = r_c.shape
-                ecg = r_e.unsqueeze(0).expand(Nc, D)
-                labs = r_l.unsqueeze(0).expand(Nc, D)
+                Nc = r_c.shape[0]
+                D = r_c.shape[-1]
+                Ta = r_c.shape[1]
+                Tb = r_e.shape[0] if r_e.ndim == 2 else r_e.shape[1]
+                Tc = r_l.shape[0] if r_l.ndim == 2 else r_l.shape[1]
+
+                ecg = r_e.unsqueeze(0).expand(Nc, Tb, D) if r_e.ndim == 2 else r_e.unsqueeze(0).expand(Nc, Tb, D)
+                labs = r_l.unsqueeze(0).expand(Nc, Tc, D) if r_l.ndim == 2 else r_l.unsqueeze(0).expand(Nc, Tc, D)
                 pair_embs = [r_c, ecg, labs]
 
                 chunk_size = int(self.params_method.get("gate_candidate_chunk_size", 256))
@@ -499,11 +520,19 @@ class SymileMIMICModel(LightningModuleParent):
 
                 logits = logits.cpu()
             elif self.modelname == "symile_attention":
-                Nc, D = r_c.shape
-                ecg = r_e.unsqueeze(0).expand(Nc, D)
-                labs = r_l.unsqueeze(0).expand(Nc, D)
+                r_c_seq = self._ensure_seq(r_c)  # (Nc, T_a, D)
+                r_e_seq = self._ensure_single_seq(r_e)  # (T_b, D)
+                r_l_seq = self._ensure_single_seq(r_l)  # (T_c, D)
 
-                z = self.model.transformer([r_c, ecg, labs])
+                Nc = r_c_seq.shape[0]
+                D = r_c_seq.shape[-1]
+                Tb = r_e_seq.shape[0]
+                Tc = r_l_seq.shape[0]
+
+                ecg = r_e_seq.unsqueeze(0).expand(Nc, Tb, D)
+                labs = r_l_seq.unsqueeze(0).expand(Nc, Tc, D)
+
+                z = self.model.transformer([r_c_seq, ecg, labs])
                 if z.dim() == 2 and z.shape[1] == 1:
                     z = z.squeeze(1)
                 elif z.dim() != 1:

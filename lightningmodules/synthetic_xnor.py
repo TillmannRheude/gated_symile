@@ -152,7 +152,7 @@ class SyntheticXNORModel(LightningModuleParent):
                 raise ValueError(f"Expected transformer score shape (B*B,) or (B*B,1), got {tuple(z.shape)}")
 
             logits = z.view(B, B)
-            # logits = self.logit_scale.exp() * logits
+            logits = self.logit_scale.exp() * logits
 
             if self.bias is not None:
                 logits = logits + self.bias

@@ -70,10 +70,12 @@ def build_model(cfg: dict):
         ])
         model = Contrastive_Model(encoders=encoders)
         if cfg["modelname"]["modelname"] == "symile_attention":
+            cfg["modelname"]["transformer_params"]["d_model"] = cfg["modelname"]["emb_dim"]
             model = TransformerSymile_Model(
                 contrastive_model=model,
                 transformer_params=cfg["modelname"]["transformer_params"],
                 proj_output_dim=1,
+                seq_dims=[1,1,1]  # 25,1,1
             )
 
         return SymileMIMICModel(
@@ -146,10 +148,12 @@ def build_model(cfg: dict):
             )
         model = Contrastive_Model(encoders=encoders)
         if cfg["modelname"]["modelname"] == "symile_attention":
+            cfg["modelname"]["transformer_params"]["d_model"] = cfg["modelname"]["emb_dim"]
             model = TransformerSymile_Model(
                 contrastive_model=model,
                 transformer_params=cfg["modelname"]["transformer_params"],
                 proj_output_dim=1,
+                seq_dims=[1,1,1]
             )
 
         return UKBModel(
@@ -180,10 +184,12 @@ def build_model(cfg: dict):
         ])
         model = Contrastive_Model(encoders=encoders)
         if cfg["modelname"]["modelname"] == "symile_attention":
+            cfg["modelname"]["transformer_params"]["d_model"] = cfg["modelname"]["emb_dim"]
             model = TransformerSymile_Model(
                 contrastive_model=model,
                 transformer_params=cfg["modelname"]["transformer_params"],
                 proj_output_dim=1,
+                seq_dims=[1,1,1]
             )
         if cfg["modelname"]["modelname"] == "comm":
             model = CoMM_Model(
