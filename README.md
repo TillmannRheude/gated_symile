@@ -1,6 +1,6 @@
 # Hidden in the Multiplicative Interaction
 
-[![arXiv](https://img.shields.io/badge/arXiv-2512.22991-b31b1b.svg)](https://arxiv.org/pdf/2512.22991)
+[![arXiv](https://img.shields.io/badge/arXiv-2604.05834-b31b1b.svg)](https://arxiv.org/pdf/2604.05834)
 
 ## Abstract
 <div align="justify">
@@ -21,10 +21,11 @@ TODO
 In case you find our work helpful, we're happy if you cite us as following
 ```bibtex
 @unpublished{Rheude_Hegselmann_Eils_Wild_2025, 
-  title={Hidden in the Multiplicative Interaction: Uncovering Fragility in Multimodal Contrastive Learning}, 
-  url={...},
-  publisher={arXiv}, 
-  author={Rheude, Tillmann and Hegselmann, Stefan and Eils, Roland and Wild, Benjamin}, 
-  year={2026},
-  month=march
+      title={Hidden in the Multiplicative Interaction: Uncovering Fragility in Multimodal Contrastive Learning}, 
+      author={Tillmann Rheude and Stefan Hegselmann and Roland Eils and Benjamin Wild},
+      year={2026},
+      eprint={2604.05834},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2604.05834}, 
 }
