@@ -223,30 +223,39 @@ class TransformerSymile(nn.Module):
         },
         proj_output_dim: int = 1,
         max_modalities: int = 3,
+        seq_dims: list[int] = [1, 1, 1],
     ):
         super().__init__()
         d_model = transformer_params["d_model"]
         self.max_modalities = int(max_modalities)
-        
-        # learned modality/type embeddings
-        self.modality_embedding = nn.Parameter(
-            torch.zeros(1, self.max_modalities, d_model)
-        )
 
-        # small per-modality projections to break exchangeability
-        self.modality_projs = nn.ModuleList([
+        self.mod_projs = nn.ModuleList([
             nn.Linear(d_model, d_model) for _ in range(self.max_modalities)
         ])
+        self.mod_proj_norm = nn.LayerNorm(d_model)
+        self.mod_embeddings = nn.ParameterList([
+            nn.Parameter(torch.zeros(1, 1, d_model)) for _ in range(self.max_modalities)
+        ])
 
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_model,
-            nhead=transformer_params["nhead"],
-            dim_feedforward=d_model * 4,
-            dropout=transformer_params["dropout"],
-            batch_first=True,
-            norm_first=True,
-            activation="gelu",
-        )
+        sigmoid_transformer = True
+        if not sigmoid_transformer:
+            encoder_layer = nn.TransformerEncoderLayer(
+                d_model=d_model,
+                nhead=transformer_params["nhead"],
+                dim_feedforward=d_model * 4,
+                dropout=transformer_params["dropout"],
+                batch_first=True,
+                norm_first=True,
+                activation="gelu",
+            )
+        else:
+            from utils import SigmoidTransformerEncoderLayer
+            encoder_layer = SigmoidTransformerEncoderLayer(
+                d_model=d_model,
+                nhead=transformer_params["nhead"],
+                dim_feedforward=d_model * 4,
+                dropout=transformer_params["dropout"],
+            )
         self.transformer = nn.TransformerEncoder(
             encoder_layer,
             num_layers=transformer_params["num_layers"],
@@ -254,22 +263,13 @@ class TransformerSymile(nn.Module):
 
         # scorer on flattened token outputs
         self.proj_head = nn.Sequential(
-            nn.LayerNorm(d_model * self.max_modalities),
-            nn.Linear(d_model * self.max_modalities, d_model),
+            nn.LayerNorm(d_model * sum(seq_dims)),
+            nn.Linear(d_model * sum(seq_dims), d_model),
             nn.GELU(),
             nn.Linear(d_model, proj_output_dim),
         )
-        # residual linear shortcut
-        self.residual_linear = nn.Linear(
-            d_model * self.max_modalities, proj_output_dim
-        )
 
         self.apply(self._init_weights)
-        #self.cls_token = nn.Parameter(torch.zeros(1, 1, d_model))
-        #nn.init.normal_(self.cls_token, mean=0.0, std=0.02)
-        #self.reg_token = nn.Parameter(torch.zeros(1, 1, d_model))
-        #nn.init.normal_(self.reg_token, mean=0.0, std=0.02)
-        nn.init.normal_(self.modality_embedding, mean=0.0, std=0.02)
 
     def _init_weights(self, m) -> None:
         if isinstance(m, nn.LayerNorm):
@@ -295,25 +295,19 @@ class TransformerSymile(nn.Module):
         self,
         embeddings: list[torch.Tensor],
     ):
-        # per-modality projections
-        tokens = torch.stack(
-            [self.modality_projs[m](embeddings[m]) for m in range(self.max_modalities)],
+        embeddings = [
+            embedding[:, None, :] if embedding.ndim == 2 else embedding for embedding in embeddings
+        ]  # [B, 1, D]
+        embeddings = [embedding + self.mod_embeddings[m] for m, embedding in enumerate(embeddings)]
+        tokens = torch.cat(
+            [self.mod_proj_norm(self.mod_projs[m](embedding)) for m, embedding in enumerate(embeddings)],
             dim=1,
         )  # [B, M, D]
-
-        # explicit modality identity
-        tokens = tokens + self.modality_embedding[:, :self.max_modalities, :].to(
-            device=tokens.device, dtype=tokens.dtype
-        )
 
         transformer_output = self.transformer(tokens)   # [B, M, D]
 
         z = torch.flatten(transformer_output, start_dim=1)  # [B, M*D]
-
-        z_mlp = self.proj_head(z)
-        z_res = self.residual_linear(z)
-
-        z = z_mlp + z_res
+        z = self.proj_head(z)
         return z
 
 class TransformerSymile_Model(nn.Module):
@@ -326,11 +320,13 @@ class TransformerSymile_Model(nn.Module):
             "num_layers": 2,
         },
         proj_output_dim: int = 1,
+        seq_dims: list[int] = [1, 1, 1],
     ):
         super().__init__()
         self.transformer = TransformerSymile(
             transformer_params=transformer_params,
             proj_output_dim=proj_output_dim,
+            seq_dims=seq_dims,
         )
         self.contrastive_model = contrastive_model
 

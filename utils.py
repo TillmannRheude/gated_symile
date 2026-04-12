@@ -2,13 +2,6 @@ import math
 import torch
 import torch.nn as nn
 
-class NoNorm(nn.Module):
-    def __init__(self, d_model: int, eps: float = 1e-5):
-        super().__init__()
-        self.eps = eps
-
-    def forward(self, x):
-        return x
 
 class SigmoidSelfAttention(nn.Module):
     def __init__(self, d_model, nhead, dropout=0.0):
@@ -41,7 +34,7 @@ class SigmoidSelfAttention(nn.Module):
         gates = gates / (gates.sum(dim=-1, keepdim=True) + 1e-6)
         gates = self.dropout(gates)
 
-        out = torch.matmul(gates, v)               # [B, H, T, Hd]
+        out = torch.matmul(gates, v)  # [B, H, T, Hd]
         out = out.transpose(1, 2).contiguous().view(B, T, D)
         out = self.out_proj(out)
         out = x + self.alpha * out
@@ -66,6 +59,77 @@ class SigmoidTransformerEncoderLayer(nn.Module):
         x = src
         x = x + self.dropout(self.self_attn(self.norm1(x)))
         x = x + self.dropout(self.ff(self.norm2(x)))
+        return x
+
+
+class PatchEncoder_CXR(nn.Module):
+    def __init__(self, image_size=320, patch_size=64, in_channels=3, emb_dim=256):
+        super().__init__()
+        self.image_size = int(image_size)
+        self.patch_size = int(patch_size)
+        self.in_channels = int(in_channels)
+        self.emb_dim = int(emb_dim)
+
+        if self.image_size % self.patch_size != 0:
+            raise ValueError(
+                f"image_size ({self.image_size}) must be divisible by patch_size ({self.patch_size})"
+            )
+
+        self.patch_dim = self.in_channels * self.patch_size * self.patch_size
+        self.proj = nn.Linear(self.patch_dim, self.emb_dim)
+
+    def forward(self, x):
+        # x: [B, 3, 320, 320]
+        B, C, H, W = x.shape
+        if C != self.in_channels or H != self.image_size or W != self.image_size:
+            raise ValueError(
+                f"Expected input of shape [B,{self.in_channels},{self.image_size},{self.image_size}], got {tuple(x.shape)}"
+            )
+
+        p = self.patch_size
+        x = x.unfold(2, p, p).unfold(3, p, p)          # [B, C, H/p, W/p, p, p]
+        x = x.permute(0, 2, 3, 1, 4, 5).contiguous()   # [B, H/p, W/p, C, p, p]
+        x = x.view(B, -1, self.patch_dim)              # [B, T, C*p*p]
+        x = self.proj(x)                               # [B, T, D]
+        return x
+
+class PatchEncoder_ECG(nn.Module):
+    def __init__(
+        self,
+        input_size=(5000, 12),
+        patch_size=(250, 12),
+        in_channels=1,
+        emb_dim=256,
+    ):
+        super().__init__()
+        self.input_size = tuple(input_size)
+        self.patch_size = tuple(patch_size)
+        self.in_channels = int(in_channels)
+        self.emb_dim = int(emb_dim)
+
+        if len(self.input_size) != 2 or len(self.patch_size) != 2:
+            raise ValueError("input_size and patch_size must be 2D tuples")
+        if self.input_size[0] % self.patch_size[0] != 0 or self.input_size[1] % self.patch_size[1] != 0:
+            raise ValueError(
+                f"input_size {self.input_size} must be divisible by patch_size {self.patch_size}"
+            )
+
+        self.patch_dim = self.in_channels * self.patch_size[0] * self.patch_size[1]
+        self.proj = nn.Linear(self.patch_dim, self.emb_dim)
+
+    def forward(self, x):
+        # x: [B, 1, 5000, 12]
+        B, C, H, W = x.shape
+        if C != self.in_channels or (H, W) != self.input_size:
+            raise ValueError(
+                f"Expected input of shape [B,{self.in_channels},{self.input_size[0]},{self.input_size[1]}], got {tuple(x.shape)}"
+            )
+
+        ph, pw = self.patch_size
+        x = x.unfold(2, ph, ph).unfold(3, pw, pw)      # [B, C, H/ph, W/pw, ph, pw]
+        x = x.permute(0, 2, 3, 1, 4, 5).contiguous()   # [B, H/ph, W/pw, C, ph, pw]
+        x = x.view(B, -1, self.patch_dim)              # [B, T, C*ph*pw]
+        x = self.proj(x)                               # [B, T, D]
         return x
 
 

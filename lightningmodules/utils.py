@@ -115,7 +115,8 @@ class LightningModuleParent(pl.LightningModule):
         z = model_output.get("z", None)  # transformer symile output
 
         if self.params_method["embedding_norm"]:
-            embeddings = [nn.functional.normalize(emb, dim=1) for emb in embeddings]
+            # embeddings = [nn.functional.normalize(emb, dim=1) for emb in embeddings]
+            embeddings = [nn.functional.normalize(emb, dim=-1) for emb in embeddings]
         
         # DDP for Symile n^2
         if (
@@ -255,6 +256,9 @@ class LightningModuleParent(pl.LightningModule):
             return loss, embeddings
         return loss
 
+    def _ensure_seq(self, x: torch.Tensor) -> torch.Tensor:
+        return x[:, None, :] if x.ndim == 2 else x  # (B, 1, D) or (B, T, D)
+
     def _symile_attention_pair_loss(self, embeddings, labels=None, candidates=None):
         """
         Memory-efficient pair loss for TransformerSymile.
@@ -265,16 +269,19 @@ class LightningModuleParent(pl.LightningModule):
         same objective.
         """
         r_a, r_b, r_c = embeddings
-        emb_local = [r_a, r_b, r_c]
+        emb_local = [self._ensure_seq(r_a), self._ensure_seq(r_b), self._ensure_seq(r_c)]
 
         if candidates is None:
             c_a, c_b, c_c = r_a, r_b, r_c
         else:
             c_a, c_b, c_c = candidates
-        cand_pools = [c_a, c_b, c_c]
+        if candidates is None:
+            cand_pools = emb_local
+        else:
+            cand_pools = [self._ensure_seq(c) for c in candidates]
 
         B = r_a.shape[0]
-        D = r_a.shape[1]
+        D = r_a.shape[-1]
         K = int(self.params_method["pair_num_negatives"])
         query_chunk_size = int(self.params_method.get("attention_pair_query_chunk_size", K // 2))
 
@@ -311,11 +318,18 @@ class LightningModuleParent(pl.LightningModule):
 
                 triplets = []
                 for m in range(3):
+                    x_all = cand_pools[m] if m == t else emb_local[m]   # (B_or_N, Tm, D)
+                    Tm = x_all.shape[1]
+
                     if m == t:
-                        x = cand_pools[m][idx_q.reshape(-1)]  # (Bq*KK, D)
+                        x = x_all[idx_q.reshape(-1)]  # (Bq*KK, Tm, D)
                     else:
-                        x0 = emb_local[m][qs:qe]  # (Bq, D)
-                        x = x0[:, None, :].expand(Bq, KK, D).reshape(Bq * KK, D)
+                        x0 = x_all[qs:qe]  # (Bq, Tm, D)
+                        x = (
+                            x0[:, None, :, :]                 # (Bq, 1, Tm, D)
+                            .expand(Bq, KK, Tm, D)
+                            .reshape(Bq * KK, Tm, D)
+                        )
                     triplets.append(x)
 
                 z = self.model.transformer(triplets)
@@ -327,7 +341,7 @@ class LightningModuleParent(pl.LightningModule):
                     )
 
                 logits = z.view(Bq, KK)
-                # logits = self.logit_scale.exp() * logits
+                logits = self.logit_scale.exp() * logits
                 if self.bias is not None:
                     logits = logits + self.bias
 
@@ -351,16 +365,18 @@ class LightningModuleParent(pl.LightningModule):
             z: (B, K+1) where column 0 is the positive score.
         """
         r_a, r_b, r_c = embeddings
-        emb_local = [r_a, r_b, r_c]
+        emb_local = [self._ensure_seq(r_a), self._ensure_seq(r_b), self._ensure_seq(r_c)]
 
         if candidates is None:
             c_a, c_b, c_c = r_a, r_b, r_c
         else:
             c_a, c_b, c_c = candidates
-        cand_pools = [c_a, c_b, c_c]
+        if candidates is None:
+            cand_pools = emb_local
+        else:
+            cand_pools = [self._ensure_seq(c) for c in candidates]
 
         B = r_a.shape[0]
-        D = r_a.shape[1]
         K = int(self.params_method["pair_num_negatives"])
 
         if labels is None:
@@ -387,11 +403,19 @@ class LightningModuleParent(pl.LightningModule):
 
             triplets = []
             for m in range(3):
+                x_all = cand_pools[m] if m == t else emb_local[m]   # (B_or_N, Tm, D)
+                Tm = x_all.shape[1]
+                Dm = x_all.shape[2]
+
                 if m == t:
-                    x = cand_pools[m][idx.reshape(-1)]  # (B*KK, D)
+                    x = x_all[idx.reshape(-1)]  # (B*KK, Tm, D)
                 else:
-                    x0 = emb_local[m]                   # (B, D)
-                    x = x0[:, None, :].expand(B, KK, D).reshape(B * KK, D)
+                    x0 = x_all  # (B, Tm, D)
+                    x = (
+                        x0[:, None, :, :]                 # (B, 1, Tm, D)
+                        .expand(B, KK, Tm, Dm)
+                        .reshape(B * KK, Tm, Dm)
+                    )
                 triplets.append(x)
 
             z = self.model.transformer(triplets)  # expected shape (B*KK, 1) or (B*KK,)
