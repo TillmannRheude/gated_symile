@@ -1,6 +1,7 @@
 import torch 
 import torch.nn as nn
 import numpy as np
+import torch.distributed as dist
 
 from lightningmodules.utils import LightningModuleParent
 from torch.utils.data import DataLoader
@@ -86,6 +87,31 @@ class SymileMIMICModel(LightningModuleParent):
         if mode == "global":
             return self._zeroshot_retrieval_global(split=split, split_nr=split_nr)
         return self._zeroshot_retrieval_preselected(split=split, split_nr=split_nr, bootstrap=bootstrap)
+
+    @staticmethod
+    def _ddp_info():
+        ddp = dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1
+        if not ddp:
+            return False, 0, 1
+        return True, dist.get_rank(), dist.get_world_size()
+
+    @staticmethod
+    def _shard_bounds(n_items: int, rank: int, world_size: int) -> tuple[int, int]:
+        start = (n_items * rank) // world_size
+        end = (n_items * (rank + 1)) // world_size
+        return start, end
+
+    @staticmethod
+    def _concat_object_lists(local_values):
+        if not (dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1):
+            return list(local_values)
+        gathered = [None for _ in range(dist.get_world_size())]
+        dist.all_gather_object(gathered, list(local_values))
+        merged = []
+        for part in gathered:
+            if part:
+                merged.extend(part)
+        return merged
 
     def _encode_split_embeddings(self, split: str, split_nr: int):
         """
@@ -216,7 +242,8 @@ class SymileMIMICModel(LightningModuleParent):
                     raw = torch.einsum("bnd,nd->bn", prod, cand)  # (Bk, Nc_k)
 
                     raw = scale_mip_dvs(raw, d=D, M=3)
-                    out = self.logit_scale.exp() * raw
+                    scale = self.get_logit_scale_exp()
+                    out = raw if scale is None else scale * raw
 
                     logits[qs:qe, cs:ce] = out
 
@@ -257,7 +284,10 @@ class SymileMIMICModel(LightningModuleParent):
                     elif z.dim() != 1:
                         raise ValueError(f"Expected transformer score shape (Bk*Nc_k,) or (Bk*Nc_k,1), got {tuple(z.shape)}")
 
-                    out = self.logit_scale.exp() * z.view(Bk, Nc_k)
+                    out = z.view(Bk, Nc_k)
+                    scale = self.get_logit_scale_exp()
+                    if scale is not None:
+                        out = scale * out
                     if self.bias is not None:
                         out = out + self.bias
 
@@ -267,7 +297,7 @@ class SymileMIMICModel(LightningModuleParent):
             logits = zeroshot_retrieval_logits(
                 cand_r_c,
                 [query_r_e, query_r_l],
-                self.logit_scale.exp(),
+                self.get_logit_scale_exp(),
                 bias=self.bias,
                 modelname=self.modelname,
             ).cpu()
@@ -308,10 +338,37 @@ class SymileMIMICModel(LightningModuleParent):
         pos_idx = torch.tensor(pos_idx, dtype=torch.long)
         logits = logits.index_select(0, keep_q)
 
+        ddp, rank, world_size = self._ddp_info()
+        q_start, q_end = self._shard_bounds(int(logits.shape[0]), rank, world_size)
+        logits = logits[q_start:q_end]
+        pos_idx = pos_idx[q_start:q_end]
+        true_id = query_id.cpu().index_select(0, keep_q)[q_start:q_end]
+
+        if logits.shape[0] == 0:
+            empty_counts = torch.zeros(4, device=self.device, dtype=torch.float64)
+            if ddp:
+                dist.all_reduce(empty_counts, op=dist.ReduceOp.SUM)
+            total = int(empty_counts[3].item())
+            if total == 0:
+                return {
+                    "acc@top1": float("nan"),
+                    "acc@top3": float("nan"),
+                    "acc@top5": float("nan"),
+                    "rank_mean": float("nan"),
+                    "rank_median": float("nan"),
+                    "rank_p95": float("nan"),
+                    "hard_margin_mean": float("nan"),
+                    "hard_margin_p5": float("nan"),
+                    "hard_margin_p50": float("nan"),
+                    "hard_margin_p95": float("nan"),
+                    "pos_minus_meanneg_mean": float("nan"),
+                    "pos_prob_mean": float("nan"),
+                    "pos_prob_p50": float("nan"),
+                    "pos_prob_p95": float("nan"),
+                }
         # metrics
         pred_idx = torch.argmax(logits, dim=1)
         pred_id = cand_id.cpu().index_select(0, pred_idx)
-        true_id = query_id.cpu().index_select(0, keep_q)
 
         correct_pred_top1 = int((pred_id == true_id).sum().item())
         Bk = int(true_id.shape[0])
@@ -354,9 +411,23 @@ class SymileMIMICModel(LightningModuleParent):
             else:
                 pos_probs.append(torch.sigmoid(row[j]).item())
 
-        retrieval_acc_top1 = correct_pred_top1 / Bk
-        retrieval_acc_top3 = correct_pred_top3 / Bk
-        retrieval_acc_top5 = correct_pred_top5 / Bk
+        counts = torch.tensor(
+            [correct_pred_top1, correct_pred_top3, correct_pred_top5, Bk],
+            device=self.device,
+            dtype=torch.float64,
+        )
+        if ddp:
+            dist.all_reduce(counts, op=dist.ReduceOp.SUM)
+
+        total_queries = int(counts[3].item())
+        retrieval_acc_top1 = float(counts[0].item() / total_queries)
+        retrieval_acc_top3 = float(counts[1].item() / total_queries)
+        retrieval_acc_top5 = float(counts[2].item() / total_queries)
+
+        ranks = self._concat_object_lists(ranks)
+        hard_margins = self._concat_object_lists(hard_margins)
+        pos_minus_meanneg = self._concat_object_lists(pos_minus_meanneg)
+        pos_probs = self._concat_object_lists(pos_probs)
 
         ranks_t = torch.tensor(ranks, dtype=torch.float32)
         margins_t = torch.tensor(hard_margins, dtype=torch.float32)
@@ -436,6 +507,8 @@ class SymileMIMICModel(LightningModuleParent):
             query_r_l = gated_list[2]
 
         query_hadm_id = retrieval_ds["hadm_id"][mask]
+        ddp, rank, world_size = self._ddp_info()
+        q_start, q_end = self._shard_bounds(int(query_hadm_id.shape[0]), rank, world_size)
 
         correct_pred_top1 = 0
         correct_pred_top3 = 0
@@ -450,7 +523,8 @@ class SymileMIMICModel(LightningModuleParent):
         candidates_per_query = []
 
         # loop through each query sample
-        for ix, true_hadm_id in enumerate(query_hadm_id):
+        for ix in range(q_start, q_end):
+            true_hadm_id = query_hadm_id[ix]
             r_c = query_r_c[ix] # (d,)
             r_e = query_r_e[ix] # (d,)
             r_l = query_r_l[ix] # (d,)
@@ -511,7 +585,9 @@ class SymileMIMICModel(LightningModuleParent):
 
                 raw = torch.cat(raw_chunks, dim=0).unsqueeze(0)  # (1, Nc)
                 logits = scale_mip_dvs(raw, d=D, M=3)
-                logits = self.logit_scale.exp() * logits
+                scale = self.get_logit_scale_exp()
+                if scale is not None:
+                    logits = scale * logits
 
                 if count_w > 0:
                     mean_w = sum_w / float(count_w)
@@ -538,7 +614,10 @@ class SymileMIMICModel(LightningModuleParent):
                 elif z.dim() != 1:
                     raise ValueError(f"Expected transformer score shape (Nc,) or (Nc,1), got {tuple(z.shape)}")
 
-                logits = (self.logit_scale.exp() * z.unsqueeze(0))
+                logits = z.unsqueeze(0)
+                scale = self.get_logit_scale_exp()
+                if scale is not None:
+                    logits = scale * logits
                 if self.bias is not None:
                     logits = logits + self.bias
                 logits = logits.cpu()
@@ -546,7 +625,7 @@ class SymileMIMICModel(LightningModuleParent):
                 logits = zeroshot_retrieval_logits(
                     r_c,
                     [r_e, r_l],
-                    self.logit_scale.exp(),
+                    self.get_logit_scale_exp(),
                     bias=self.bias,
                     modelname=self.modelname,
                 ).cpu()
@@ -603,11 +682,26 @@ class SymileMIMICModel(LightningModuleParent):
             if true_ix in topk_indices[0]:
                 correct_pred_top5 += 1
 
-        retrieval_acc_top1 = correct_pred_top1 / len(query_hadm_id)
-        retrieval_acc_top3 = correct_pred_top3 / len(query_hadm_id)
-        retrieval_acc_top5 = correct_pred_top5 / len(query_hadm_id)
+        local_total = max(0, q_end - q_start)
+        counts = torch.tensor(
+            [correct_pred_top1, correct_pred_top3, correct_pred_top5, local_total],
+            device=self.device,
+            dtype=torch.float64,
+        )
+        if ddp:
+            dist.all_reduce(counts, op=dist.ReduceOp.SUM)
+
+        total_queries = int(counts[3].item())
+        retrieval_acc_top1 = float(counts[0].item() / total_queries)
+        retrieval_acc_top3 = float(counts[1].item() / total_queries)
+        retrieval_acc_top5 = float(counts[2].item() / total_queries)
 
         # Aggregate diagnostics
+        ranks = self._concat_object_lists(ranks)
+        hard_margins = self._concat_object_lists(hard_margins)
+        pos_minus_meanneg = self._concat_object_lists(pos_minus_meanneg)
+        pos_probs = self._concat_object_lists(pos_probs)
+
         ranks_t = torch.tensor(ranks, dtype=torch.float32)
         margins_t = torch.tensor(hard_margins, dtype=torch.float32)
         pos_minus_meanneg_t = torch.tensor(pos_minus_meanneg, dtype=torch.float32)

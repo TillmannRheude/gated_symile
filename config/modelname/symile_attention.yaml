@@ -3,7 +3,7 @@ modelname: symile_attention
 emb_dim: 128
 
 negative_sampling: pair  # n_squared, pair
-logit_scale_init: 0
+logit_scale_init: None
 embedding_norm: True
 
 transformer_params:

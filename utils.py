@@ -1,6 +1,7 @@
 import math
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class SigmoidSelfAttention(nn.Module):
@@ -21,6 +22,9 @@ class SigmoidSelfAttention(nn.Module):
         self.out_proj = nn.Linear(d_model, d_model)
         self.dropout = nn.Dropout(dropout)
         self.alpha = nn.Parameter(torch.tensor(0.1))
+        # Learnable temperature helps keep sigmoid attention logits in a stable regime.
+        self.logit_scale = nn.Parameter(torch.tensor(0.0))
+        self.eps = 1e-6
 
     def forward(self, x):
         B, T, D = x.shape
@@ -29,9 +33,13 @@ class SigmoidSelfAttention(nn.Module):
         k = self.k_proj(x).view(B, T, self.nhead, self.head_dim).transpose(1, 2)
         v = self.v_proj(x).view(B, T, self.nhead, self.head_dim).transpose(1, 2)
 
-        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        q = F.normalize(q, dim=-1, eps=self.eps)
+        k = F.normalize(k, dim=-1, eps=self.eps)
+
+        temperature = F.softplus(self.logit_scale) + 1e-2
+        scores = torch.matmul(q, k.transpose(-2, -1)) / temperature
         gates = torch.sigmoid(scores)
-        gates = gates / (gates.sum(dim=-1, keepdim=True) + 1e-6)
+        gates = gates / (gates.sum(dim=-1, keepdim=True) + self.eps)
         gates = self.dropout(gates)
 
         out = torch.matmul(gates, v)  # [B, H, T, Hd]
@@ -63,12 +71,13 @@ class SigmoidTransformerEncoderLayer(nn.Module):
 
 
 class PatchEncoder_CXR(nn.Module):
-    def __init__(self, image_size=320, patch_size=64, in_channels=3, emb_dim=256):
+    def __init__(self, image_size=320, patch_size=64, in_channels=3, emb_dim=256, num_tokens=None):
         super().__init__()
         self.image_size = int(image_size)
         self.patch_size = int(patch_size)
         self.in_channels = int(in_channels)
         self.emb_dim = int(emb_dim)
+        self.num_tokens = None if num_tokens is None else int(num_tokens)
 
         if self.image_size % self.patch_size != 0:
             raise ValueError(
@@ -91,6 +100,8 @@ class PatchEncoder_CXR(nn.Module):
         x = x.permute(0, 2, 3, 1, 4, 5).contiguous()   # [B, H/p, W/p, C, p, p]
         x = x.view(B, -1, self.patch_dim)              # [B, T, C*p*p]
         x = self.proj(x)                               # [B, T, D]
+        if self.num_tokens is not None:
+            x = F.adaptive_avg_pool1d(x.transpose(1, 2), self.num_tokens).transpose(1, 2)
         return x
 
 class PatchEncoder_ECG(nn.Module):
@@ -100,12 +111,14 @@ class PatchEncoder_ECG(nn.Module):
         patch_size=(250, 12),
         in_channels=1,
         emb_dim=256,
+        num_tokens=None,
     ):
         super().__init__()
         self.input_size = tuple(input_size)
         self.patch_size = tuple(patch_size)
         self.in_channels = int(in_channels)
         self.emb_dim = int(emb_dim)
+        self.num_tokens = None if num_tokens is None else int(num_tokens)
 
         if len(self.input_size) != 2 or len(self.patch_size) != 2:
             raise ValueError("input_size and patch_size must be 2D tuples")
@@ -130,6 +143,8 @@ class PatchEncoder_ECG(nn.Module):
         x = x.permute(0, 2, 3, 1, 4, 5).contiguous()   # [B, H/ph, W/pw, C, ph, pw]
         x = x.view(B, -1, self.patch_dim)              # [B, T, C*ph*pw]
         x = self.proj(x)                               # [B, T, D]
+        if self.num_tokens is not None:
+            x = F.adaptive_avg_pool1d(x.transpose(1, 2), self.num_tokens).transpose(1, 2)
         return x
 
 

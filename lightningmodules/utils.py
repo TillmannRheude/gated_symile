@@ -55,7 +55,11 @@ class LightningModuleParent(pl.LightningModule):
         self.step_walltime_every = int(self.params_method.get("step_walltime_every", 50))
 
         # Temperature Tau
-        self.logit_scale = nn.Parameter(torch.ones([]) * params_method["logit_scale_init"])
+        if params_method["logit_scale_init"] is None or params_method["logit_scale_init"] == "None":
+            self.logit_scale = None
+        else:
+            self.logit_scale = nn.Parameter(torch.ones([]) * float(params_method["logit_scale_init"]))
+
 
         #freeze_logit_scale = True  # DEBUG toggle
         #if freeze_logit_scale:
@@ -107,6 +111,7 @@ class LightningModuleParent(pl.LightningModule):
         set: str = "train",
         return_embeddings: bool = False,
     ) -> torch.tensor:
+        logit_scale_exp = self.get_logit_scale_exp()
         model_output = self.forward(batch)
         embeddings = model_output["embeddings"]
 
@@ -118,8 +123,33 @@ class LightningModuleParent(pl.LightningModule):
             # embeddings = [nn.functional.normalize(emb, dim=1) for emb in embeddings]
             embeddings = [nn.functional.normalize(emb, dim=-1) for emb in embeddings]
         
-        # DDP for Symile n^2
+        # DDP for global-batch contrastive objectives.
         if (
+            set == "train"
+            and self.modelname == "symile_attention"
+            and self.params_method["negative_sampling"] == "pair"
+            and dist.is_available()
+            and dist.is_initialized()
+            and dist.get_world_size() > 1
+        ):
+            r_a_local, r_b_local, r_c_local = embeddings
+
+            r_a_all = self._all_gather_with_grad(r_a_local)
+            r_b_all = self._all_gather_with_grad(r_b_local)
+            r_c_all = self._all_gather_with_grad(r_c_local)
+
+            b_local = r_a_local.shape[0]
+            rank = dist.get_rank()
+            labels = torch.arange(rank * b_local, rank * b_local + b_local, device=self.device)
+
+            loss = self._symile_attention_pair_loss(
+                embeddings=(r_a_local, r_b_local, r_c_local),
+                labels=labels,
+                candidates=(r_a_all, r_b_all, r_c_all),
+            )
+
+        # DDP for Symile n^2 / pair
+        elif (
             set == "train"
             and self.modelname == "symile"
             and self.params_method["negative_sampling"] in ["n_squared", "pair"]
@@ -160,7 +190,7 @@ class LightningModuleParent(pl.LightningModule):
                 if self.params_method["negative_sampling"] == "pair":
                     loss = self.loss(
                         r_a_local, r_b_local, r_c_local,
-                        logit_scale=self.logit_scale.exp(),
+                        logit_scale=logit_scale_exp,
                         negative_sampling=self.params_method["negative_sampling"],
                         gate=self.gate,
                         bias=self.bias,
@@ -171,7 +201,7 @@ class LightningModuleParent(pl.LightningModule):
                 else:
                     loss = self.loss(
                         r_a_local, r_b_local, r_c_local,
-                        logit_scale=self.logit_scale.exp(),
+                        logit_scale=logit_scale_exp,
                         negative_sampling=self.params_method["negative_sampling"], 
                         gate=self.gate,
                         bias=self.bias,
@@ -182,7 +212,7 @@ class LightningModuleParent(pl.LightningModule):
                 if self.params_method["negative_sampling"] == "pair":
                     loss = self.loss(
                         r_a_local, r_b_local, r_c_local,
-                        logit_scale=self.logit_scale.exp(),
+                        logit_scale=logit_scale_exp,
                         negative_sampling=self.params_method["negative_sampling"],
                         bias=None,
                         labels=labels,
@@ -192,7 +222,7 @@ class LightningModuleParent(pl.LightningModule):
                 else:
                     loss = self.loss(
                         r_a_local, r_b_local, r_c_local,
-                        logit_scale=self.logit_scale.exp(),
+                        logit_scale=logit_scale_exp,
                         negative_sampling=self.params_method["negative_sampling"],
                         bias=None,
                         labels=labels,
@@ -203,7 +233,7 @@ class LightningModuleParent(pl.LightningModule):
                 if self.params_method["negative_sampling"] == "pair":
                     loss = self.loss(
                         *embeddings,
-                        logit_scale=self.logit_scale.exp(),
+                        logit_scale=logit_scale_exp,
                         negative_sampling=self.params_method["negative_sampling"],
                         gate=self.gate,
                         bias=self.bias,
@@ -212,7 +242,7 @@ class LightningModuleParent(pl.LightningModule):
                 else:
                     loss = self.loss(
                         *embeddings,
-                        logit_scale=self.logit_scale.exp(),
+                        logit_scale=logit_scale_exp,
                         negative_sampling=self.params_method["negative_sampling"],
                         gate=self.gate,
                         bias=self.bias,
@@ -223,7 +253,7 @@ class LightningModuleParent(pl.LightningModule):
                 elif self.modelname == "comm":
                     loss = self.loss(
                         *embeddings,
-                        logit_scale=self.logit_scale.exp(),
+                        logit_scale=logit_scale_exp,
                         negative_sampling=self.params_method["negative_sampling"],
                         bias=self.bias,
                         z_view1=z_view1,
@@ -232,7 +262,7 @@ class LightningModuleParent(pl.LightningModule):
                 elif self.params_method["negative_sampling"] == "pair":
                     loss = self.loss(
                         *embeddings,
-                        logit_scale=self.logit_scale.exp(),
+                        logit_scale=logit_scale_exp,
                         negative_sampling=self.params_method["negative_sampling"],
                         bias=None,
                         pair_num_negatives=self.params_method["pair_num_negatives"],
@@ -240,7 +270,7 @@ class LightningModuleParent(pl.LightningModule):
                 else:
                     loss = self.loss(
                         *embeddings,
-                        logit_scale=self.logit_scale.exp(),
+                        logit_scale=logit_scale_exp,
                         negative_sampling=self.params_method["negative_sampling"],
                         bias=self.bias,
                     )
@@ -250,11 +280,17 @@ class LightningModuleParent(pl.LightningModule):
         if self.bias is not None:
             # log the scalar bias and the effective temperature scale
             self.log(f"{set}/bias", self.bias.detach(), on_step=True, on_epoch=True, sync_dist=True, prog_bar=False)
-            self.log(f"{set}/logit_scale_exp", self.logit_scale.exp().detach(), on_step=True, on_epoch=True, sync_dist=True, prog_bar=False)
+        if self.logit_scale is not None:
+            self.log(f"{set}/logit_scale_exp", logit_scale_exp.detach(), on_step=True, on_epoch=True, sync_dist=True, prog_bar=False)
 
         if return_embeddings:
             return loss, embeddings
         return loss
+
+    def get_logit_scale_exp(self):
+        if self.logit_scale is None:
+            return None
+        return self.logit_scale.exp()
 
     def _ensure_seq(self, x: torch.Tensor) -> torch.Tensor:
         return x[:, None, :] if x.ndim == 2 else x  # (B, 1, D) or (B, T, D)
@@ -341,7 +377,9 @@ class LightningModuleParent(pl.LightningModule):
                     )
 
                 logits = z.view(Bq, KK)
-                logits = self.logit_scale.exp() * logits
+                scale = self.get_logit_scale_exp()
+                if scale is not None:
+                    logits = scale * logits
                 if self.bias is not None:
                     logits = logits + self.bias
 
@@ -707,7 +745,10 @@ class LightningModuleParent(pl.LightningModule):
         # Case 2: MIMIC-style retrieval (run_zeroshot_retrieval computes acc dict)
         # -------------------------
         if hasattr(self, "run_zeroshot_retrieval"):
-            if self.trainer.is_global_zero:
+            if getattr(self, "dataset_name", None) == "symile_mimic":
+                acc_dict = self.run_zeroshot_retrieval("val")
+                acc_top1 = float(acc_dict["acc@top1"])
+            elif self.trainer.is_global_zero:
                 acc_dict = self.run_zeroshot_retrieval("val")
                 acc_top1 = float(acc_dict["acc@top1"])
             else:

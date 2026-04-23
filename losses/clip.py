@@ -1,5 +1,6 @@
 import torch
 import torch.nn.functional as F
+from losses.utils import apply_logit_scale
 
 def compute_pairwise_clip(x, y, logit_scale):
     """
@@ -7,7 +8,7 @@ def compute_pairwise_clip(x, y, logit_scale):
     """
     # x, y: (batch_sz, d) - assumed normalized if embedding_norm=True
     # logits: (batch_sz, batch_sz)
-    logits = logit_scale * x @ y.t()
+    logits = apply_logit_scale(x @ y.t(), logit_scale)
     
     labels = torch.arange(logits.shape[0], device=logits.device)
     

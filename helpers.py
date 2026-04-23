@@ -8,12 +8,14 @@ import torch
 from lightningdatamodules.symile_mimic import DataModule_SymileMimic
 from lightningdatamodules.symile_m3 import DataModule_SymileM3
 from lightningdatamodules.synthetic_xnor import DataModule_SyntheticXNOR
+from lightningdatamodules.mcmed import DataModule_MCMED
 
 # Lightningmodules 
 from lightningmodules.symile_mimic import SymileMIMICModel
 from lightningmodules.symile_m3 import SymileM3Model
 from lightningmodules.ukb import UKBModel
 from lightningmodules.synthetic_xnor import SyntheticXNORModel
+from lightningmodules.mcmed import MCMEDModel
 
 # Architecture 
 from architecture import Contrastive_Model
@@ -23,7 +25,8 @@ from encoders import (
     CXREncoder, ECGEncoder, LabsEncoder,  # symile_mimic
     AudioEncoder, ImageEncoder, TextEncoder,  # symile_m3
     UKBTabularEncoder, # ukb
-    SyntheticXNOREncoder  # synthetic_xnor
+    SyntheticXNOREncoder,  # synthetic_xnor
+    MCMEDWaveformEncoder, MCMEDRadiologyEncoder, MCMEDNumericsEncoder, # mcmed
 )
 
 def build_model(cfg: dict):
@@ -75,7 +78,7 @@ def build_model(cfg: dict):
                 contrastive_model=model,
                 transformer_params=cfg["modelname"]["transformer_params"],
                 proj_output_dim=1,
-                seq_dims=[1,1,1]  # 25,1,1
+                seq_dims=[4,8,1]
             )
 
         return SymileMIMICModel(
@@ -205,6 +208,40 @@ def build_model(cfg: dict):
             params_retrival_ds=params_retrival_ds,
         )
     
+    # MC-MED
+    if cfg["dataset_name"] == "mcmed":
+        encoders = nn.ModuleList([
+            MCMEDWaveformEncoder(
+                emb_dim=cfg["modelname"]["emb_dim"],
+                d_model=cfg["encoders"]["waveform_ii"]["transformer"]["d_model"],
+                nhead=cfg["encoders"]["waveform_ii"]["transformer"]["nhead"],
+                num_layers=cfg["encoders"]["waveform_ii"]["transformer"]["num_layers"],
+                dropout=cfg["encoders"]["waveform_ii"]["transformer"]["dropout"],
+                stem_kernel_sizes=cfg["encoders"]["waveform_ii"].get("stem_kernel_sizes", [5, 5]),
+                stem_strides=cfg["encoders"]["waveform_ii"].get("stem_strides", [2, 2]),
+            ),
+            MCMEDRadiologyEncoder(
+                model_params=cfg["encoders"].get("radiology", {}),
+                emb_dim=cfg["modelname"]["emb_dim"],
+            ),
+            MCMEDNumericsEncoder(
+                emb_dim=cfg["modelname"]["emb_dim"],
+                d_model=cfg["encoders"]["numerics"]["transformer"]["d_model"],
+                nhead=cfg["encoders"]["numerics"]["transformer"]["nhead"],
+                num_layers=cfg["encoders"]["numerics"]["transformer"]["num_layers"],
+                dropout=cfg["encoders"]["numerics"]["transformer"]["dropout"],
+                stem_kernel_sizes=cfg["encoders"]["numerics"].get("stem_kernel_sizes", [5, 5, 5]),
+                stem_strides=cfg["encoders"]["numerics"].get("stem_strides", [2, 2, 2]),
+            ),
+        ])
+        model = Contrastive_Model(encoders=encoders)
+        return MCMEDModel(
+            params_optimizer=params_optimizer,
+            params_method=params_method,
+            model=model,
+            modelname=modelname,
+            params_retrival_ds=params_retrival_ds,
+        )
     else:
         raise ValueError(f"Model {cfg['dataset_name']} not implemented.")
 
@@ -253,6 +290,15 @@ def build_datamodule(cfg: dict):
             distractor_std = cfg["encoders"]["distractor_std"],
             a_rule = cfg["encoders"]["a_rule"],
             seed = cfg["seed"],
+        )
+
+    # MC-MED
+    if cfg["dataset_name"] == "mcmed":
+        return DataModule_MCMED(
+            batch_size = cfg["batch_size"],
+            split_nr = cfg["split_nr"],
+            max_waveform_windows = cfg["encoders"].get("max_waveform_windows", 0),
+            radiology_model_params = cfg["encoders"].get("radiology", {}),
         )
     
     else:

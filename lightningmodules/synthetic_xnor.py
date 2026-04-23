@@ -110,7 +110,8 @@ class SyntheticXNORModel(LightningModuleParent):
             raw = (prod * a_pair).sum(dim=1).view(B, B)  # (B, B)
 
             raw = scale_mip_dvs(raw, d=D, M=3)
-            logits = self.logit_scale.exp() * raw
+            scale = self.get_logit_scale_exp()
+            logits = raw if scale is None else scale * raw
 
             pred = torch.argmax(logits, dim=1)
             y = torch.arange(B, device=pred.device, dtype=pred.dtype)
@@ -152,7 +153,9 @@ class SyntheticXNORModel(LightningModuleParent):
                 raise ValueError(f"Expected transformer score shape (B*B,) or (B*B,1), got {tuple(z.shape)}")
 
             logits = z.view(B, B)
-            logits = self.logit_scale.exp() * logits
+            scale = self.get_logit_scale_exp()
+            if scale is not None:
+                logits = scale * logits
 
             if self.bias is not None:
                 logits = logits + self.bias
@@ -164,7 +167,7 @@ class SyntheticXNORModel(LightningModuleParent):
             logits = zeroshot_retrieval_logits(
                 r_a,
                 rep_list,
-                self.logit_scale.exp(),
+                self.get_logit_scale_exp(),
                 bias=self.bias,
                 modelname=self.modelname,
             )

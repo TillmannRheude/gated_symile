@@ -1,5 +1,6 @@
 import torch
 import torch.nn.functional as F
+from losses.utils import apply_logit_scale
 
 
 def _sample_modality_dropout_mask(batch_size, num_modalities, keep_prob, device, dtype):
@@ -58,7 +59,7 @@ def compute_comm_logits(z_1, z_2, logit_scale):
     """
     z_1 = F.normalize(z_1, dim=1)
     z_2 = F.normalize(z_2, dim=1)
-    return logit_scale * (z_1 @ z_2.t())
+    return apply_logit_scale(z_1 @ z_2.t(), logit_scale)
 
 
 def _resolve_multimodal_views(r_a, r_b, r_c, **kwargs):

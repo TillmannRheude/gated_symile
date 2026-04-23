@@ -12,6 +12,8 @@ debug.ipynb
 test
 sweeps
 
+eval
+
 config/datamodule/*
 
 __pycache__/

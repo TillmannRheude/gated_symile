@@ -1,7 +1,7 @@
 import torch
 import itertools
 
-from losses.utils import scale_mip_dvs
+from losses.utils import apply_logit_scale, scale_mip_dvs
 from losses.gram import compute_gramian_volume_matrix
 from losses.triangle import compute_triangle_area_matrix
 
@@ -150,6 +150,6 @@ def zeroshot_retrieval_logits(
 
     assert logits.dim() == 2, "Logits must be a 2D tensor."
 
-    logits = logit_scale_exp * logits
+    logits = apply_logit_scale(logits, logit_scale_exp)
 
     return logits

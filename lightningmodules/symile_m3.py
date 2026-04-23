@@ -81,7 +81,7 @@ class SymileM3Model(LightningModuleParent):
         if r_i.numel() == 0:
             return []
         logits = zeroshot_retrieval_logits(
-            r_i, [r_a, r_t], self.logit_scale.exp(), bias=self.bias, modelname=self.modelname
+            r_i, [r_a, r_t], self.get_logit_scale_exp(), bias=self.bias, modelname=self.modelname
         )
         pred = cls_id[torch.argmax(logits, dim=1)]
         return (cls_id == pred).float().tolist()
@@ -123,7 +123,7 @@ class SymileM3Model(LightningModuleParent):
         r_t = embeddings[2][mask]
         y   = batch["cls_id"].to(self.device)[mask]
         logits = zeroshot_retrieval_logits(
-            bank["r_i"], [r_a, r_t], self.logit_scale.exp(), bias=self.bias, modelname=self.modelname
+            bank["r_i"], [r_a, r_t], self.get_logit_scale_exp(), bias=self.bias, modelname=self.modelname
         )
         pred = bank["cls_id"][torch.argmax(logits, dim=1)]
         return (y == pred).float().tolist()
@@ -214,7 +214,7 @@ class SymileM3Model(LightningModuleParent):
         logits = zeroshot_retrieval_logits(
             r_i, 
             [r_a, r_t], 
-            self.logit_scale.exp(),
+            self.get_logit_scale_exp(),
             bias=self.bias,
             modelname=self.modelname
         )  # .cpu()

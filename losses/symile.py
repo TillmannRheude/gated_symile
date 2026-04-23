@@ -1,6 +1,6 @@
 import torch
 import torch.nn.functional as F
-from losses.utils import scale_mip_dvs
+from losses.utils import apply_logit_scale, scale_mip_dvs
 
 def compute_logits_neg_sampling_n(x, y, z):
     # shuffle rows of y and z
@@ -64,7 +64,7 @@ def symile_attention(
     if logits.dim() != 2:
         raise ValueError(f"`z` must have shape (B,), (B,1), or (B,C); got {tuple(logits.shape)}")
 
-    logits = logit_scale * logits
+    logits = apply_logit_scale(logits, logit_scale)
 
     if bias is not None:
         logits = logits + bias
@@ -178,7 +178,7 @@ def symile_gated(
 
             # DVS scaling + temperature
             raw = scale_mip_dvs(raw, d=d, M=M)
-            logits = logit_scale * raw
+            logits = apply_logit_scale(raw, logit_scale)
             if bias is not None:
                 logits = logits + bias  # safe no-op for symile
 
@@ -230,9 +230,9 @@ def symile_gated(
     raw_b = scale_mip_dvs(raw_b, d, M)
     raw_c = scale_mip_dvs(raw_c, d, M)
 
-    logits_a = logit_scale * raw_a
-    logits_b = logit_scale * raw_b
-    logits_c = logit_scale * raw_c
+    logits_a = apply_logit_scale(raw_a, logit_scale)
+    logits_b = apply_logit_scale(raw_b, logit_scale)
+    logits_c = apply_logit_scale(raw_c, logit_scale)
 
     if labels is None:
         labels = torch.arange(logits_a.shape[0], device=r_a.device)
@@ -316,7 +316,7 @@ def symile(
 
             # DVS scaling + temperature
             raw = scale_mip_dvs(raw, d=d, M=M)
-            logits = logit_scale * raw
+            logits = apply_logit_scale(raw, logit_scale)
             if bias is not None:
                 logits = logits + bias  # no-op for symile, but harmless
 
@@ -344,9 +344,9 @@ def symile(
     raw_b = scale_mip_dvs(raw_b, d, M)
     raw_c = scale_mip_dvs(raw_c, d, M)
     # Temperature
-    logits_a = logit_scale * raw_a
-    logits_b = logit_scale * raw_b
-    logits_c = logit_scale * raw_c
+    logits_a = apply_logit_scale(raw_a, logit_scale)
+    logits_b = apply_logit_scale(raw_b, logit_scale)
+    logits_c = apply_logit_scale(raw_c, logit_scale)
 
     if labels is None:
         labels = torch.arange(logits_a.shape[0], device=r_a.device)

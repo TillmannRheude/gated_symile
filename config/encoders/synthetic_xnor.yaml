@@ -23,7 +23,7 @@ p_flips: [0.0, 0.0]
 p_corrs: [0.0, 1.0, 1.0]
 
 # use misleading corruption (not gaussian) so ungated gets pulled the wrong way
-corr_modes: "swap_signal"
+corr_modes: "swap_signal"  # "swap_signal"
 
 # Optional: make B/C corruption mutually exclusive (per sample).
 # If enabled and `bc_corr_p` is null, this expects `p_corrs[1] == p_corrs[2]` and uses that value.

@@ -224,29 +224,44 @@ class TransformerSymile(nn.Module):
         proj_output_dim: int = 1,
         max_modalities: int = 3,
         seq_dims: list[int] = [1, 1, 1],
+        num_register_tokens: int = 0,
+        use_mask_tokens: bool = False,
     ):
         super().__init__()
         d_model = transformer_params["d_model"]
         self.max_modalities = int(max_modalities)
+        self.seq_dims = list(seq_dims)
+        self.num_register_tokens = int(num_register_tokens)
+        self.use_mask_tokens = bool(use_mask_tokens)
 
-        self.mod_projs = nn.ModuleList([
-            nn.Linear(d_model, d_model) for _ in range(self.max_modalities)
-        ])
-        self.mod_proj_norm = nn.LayerNorm(d_model)
-        self.mod_embeddings = nn.ParameterList([
-            nn.Parameter(torch.zeros(1, 1, d_model)) for _ in range(self.max_modalities)
-        ])
+        #self.mod_projs = nn.ModuleList([
+        #    nn.Linear(d_model, d_model) for _ in range(self.max_modalities)
+        #])
+        #self.mod_embeddings = nn.ParameterList([
+        #    nn.Parameter(torch.zeros(1, 1, d_model)) for _ in range(self.max_modalities)
+        #])
+        if self.use_mask_tokens:
+            self.mask_tokens = nn.ParameterList([
+                nn.Parameter(torch.zeros(1, 1, d_model)) for _ in range(self.max_modalities)
+            ])
+        else:
+            self.mask_tokens = None
+        
+        if self.num_register_tokens > 0:
+            self.register_tokens = nn.Parameter(torch.zeros(1, self.num_register_tokens, d_model))
+        else:
+            self.register_tokens = None
 
-        sigmoid_transformer = True
+        sigmoid_transformer = False
         if not sigmoid_transformer:
             encoder_layer = nn.TransformerEncoderLayer(
                 d_model=d_model,
                 nhead=transformer_params["nhead"],
-                dim_feedforward=d_model * 4,
+                dim_feedforward=d_model,
                 dropout=transformer_params["dropout"],
                 batch_first=True,
                 norm_first=True,
-                activation="gelu",
+                activation="gelu"
             )
         else:
             from utils import SigmoidTransformerEncoderLayer
@@ -268,8 +283,21 @@ class TransformerSymile(nn.Module):
             nn.GELU(),
             nn.Linear(d_model, proj_output_dim),
         )
+        #self.cls_token = nn.Parameter(torch.zeros(1, 1, d_model))
+        #self.linear = nn.Linear(d_model, proj_output_dim)
 
         self.apply(self._init_weights)
+        for layer in self.transformer.layers:
+            for sublayer in layer.modules():
+                mimetic_init_svd_(sublayer)
+        
+        if self.num_register_tokens > 0:
+            nn.init.normal_(self.register_tokens, mean=0.0, std=0.02)
+        if self.mask_tokens is not None:
+            for param in self.mask_tokens:
+                nn.init.normal_(param, mean=0.0, std=0.02)
+        #for param in self.mod_embeddings:
+        #    nn.init.normal_(param, mean=0.0, std=0.02)
 
     def _init_weights(self, m) -> None:
         if isinstance(m, nn.LayerNorm):
@@ -294,20 +322,62 @@ class TransformerSymile(nn.Module):
     def forward(
         self,
         embeddings: list[torch.Tensor],
+        source_mask: torch.Tensor = None,
     ):
         embeddings = [
             embedding[:, None, :] if embedding.ndim == 2 else embedding for embedding in embeddings
         ]  # [B, 1, D]
-        embeddings = [embedding + self.mod_embeddings[m] for m, embedding in enumerate(embeddings)]
-        tokens = torch.cat(
-            [self.mod_proj_norm(self.mod_projs[m](embedding)) for m, embedding in enumerate(embeddings)],
-            dim=1,
-        )  # [B, M, D]
+
+        if source_mask is not None:
+            if not self.use_mask_tokens or self.mask_tokens is None:
+                raise ValueError("source_mask was provided, but use_mask_tokens is disabled for TransformerSymile.")
+            if source_mask.shape != (embeddings[0].shape[0], self.max_modalities):
+                raise ValueError(
+                    f"Expected source_mask shape {(embeddings[0].shape[0], self.max_modalities)}, got {tuple(source_mask.shape)}"
+                )
+            source_mask = source_mask.to(device=embeddings[0].device, dtype=torch.bool)
+
+        """ 
+        modality_tokens = []
+        token_slices = []
+        start = 0
+        for m, embedding in enumerate(embeddings):
+            #tok = self.mod_projs[m](embedding)
+            tok = embedding
+            tok = tok + self.mod_embeddings[m]
+            if source_mask is not None:
+                missing = source_mask[:, m]
+                if missing.any():
+                    mask_tok = self.mask_tokens[m].expand(tok.shape[0], tok.shape[1], -1)
+                    missing_view = missing[:, None, None]
+                    tok = torch.where(missing_view, mask_tok, tok)
+            modality_tokens.append(tok)
+            end = start + tok.shape[1]
+            token_slices.append((start, end))
+            start = end
+        tokens = torch.cat(modality_tokens, dim=1)  # [B, sum(seq_dims), D]
+        """
+
+        tokens = torch.cat(embeddings, dim=1)  # [B, M, D]
+
+        # add registers 
+        if self.num_register_tokens > 0:
+            reg = self.register_tokens.expand(tokens.shape[0], -1, -1)
+            tokens = torch.cat([tokens, reg], dim=1)
+
+        # add cls token
+        #cls = self.cls_token.expand(tokens.shape[0], -1, -1)
+        #tokens = torch.cat([cls, tokens], dim=1)
 
         transformer_output = self.transformer(tokens)   # [B, M, D]
 
+        # Drop register tokens
+        if self.num_register_tokens > 0:
+            transformer_output = transformer_output[:, :-self.num_register_tokens, :]
+
         z = torch.flatten(transformer_output, start_dim=1)  # [B, M*D]
         z = self.proj_head(z)
+        #z = self.linear(transformer_output[:, 0, :])
         return z
 
 class TransformerSymile_Model(nn.Module):
@@ -333,9 +403,10 @@ class TransformerSymile_Model(nn.Module):
     def forward(
         self,
         x: list = [torch.Tensor, torch.Tensor, torch.Tensor],
+        source_mask: torch.Tensor = None,
     ):
         embeddings = self.contrastive_model(x)["embeddings"]
-        z = self.transformer(embeddings)
+        z = self.transformer(embeddings, source_mask=source_mask)
         return {
             "embeddings": embeddings,
             "z": z,
