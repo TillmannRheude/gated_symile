@@ -283,7 +283,9 @@ class UKBModel(LightningModuleParent):
                 scale_base = D ** ((M - 1) / 2)
                 logits = logits * scale_base
 
-                logits = logits * self.logit_scale.exp()
+                scale = self.get_logit_scale_exp()
+                if scale is not None:
+                    logits = logits * scale
 
                 y = torch.tensor(batch["eids"]).to(self.device)[keep]
                 pred = r_cls_id[torch.argmax(logits, dim=1)]
@@ -360,14 +362,16 @@ class UKBModel(LightningModuleParent):
                 logits_chunks.append(logits_chunk)
 
             logits = torch.cat(logits_chunks, dim=1)
-            logits = logits * self.logit_scale.exp()
+            scale = self.get_logit_scale_exp()
+            if scale is not None:
+                logits = logits * scale
             if self.bias is not None:
                 logits = logits + self.bias
         else:
             logits = zeroshot_retrieval_logits(
                 r_candidates,
                 rep_list,
-                self.logit_scale.exp(),
+                self.get_logit_scale_exp(),
                 bias=self.bias,
                 modelname=self.modelname,
             )

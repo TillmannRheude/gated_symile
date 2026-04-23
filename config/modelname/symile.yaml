@@ -1,12 +1,12 @@
 modelname: symile
 
-emb_dim: 256
+emb_dim: 512
 
-negative_sampling: n  # n_squared, pair
-logit_scale_init: 0  # -2.65926
+negative_sampling: pair  # n, n_squared, pair
+logit_scale_init: -2.65926  # 0
 embedding_norm: True
 
-pair_num_negatives: 512  # number of negatives for pair sampling, 
+pair_num_negatives: 128  # number of negatives for pair sampling, 
 
 use_gate: False
 use_null: True

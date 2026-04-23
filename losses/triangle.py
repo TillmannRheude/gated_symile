@@ -1,5 +1,6 @@
 import torch
 import torch.nn.functional as F
+from losses.utils import apply_logit_scale
 
 
 def compute_triangle_area_matrix(anchor, mod_b, mod_c, squared=True, eps=1e-8):
@@ -105,7 +106,7 @@ def compute_triangle_infonce(anchor, mod_b, mod_c, logit_scale, squared=True, ep
     area = compute_triangle_area_matrix_efficient(anchor, mod_b, mod_c, squared=squared, eps=eps)
 
     # Smaller area = better match, so negate it to obtain logits.
-    logits = -logit_scale * area
+    logits = apply_logit_scale(-area, logit_scale)
 
     labels = torch.arange(logits.shape[0], device=logits.device)
 

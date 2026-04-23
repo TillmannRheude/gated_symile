@@ -1,5 +1,6 @@
 import torch
 import torch.nn.functional as F
+from losses.utils import apply_logit_scale
 
 
 def compute_gramian_volume_matrix(anchor, *inputs, eps=1e-8):
@@ -57,7 +58,7 @@ def compute_gram_infonce(anchor, *inputs, logit_scale, eps=1e-8):
     Symmetric InfoNCE-style GRAM loss for one anchor choice.
     """
     volume = compute_gramian_volume_matrix(anchor, *inputs, eps=eps)
-    logits = -logit_scale * volume
+    logits = apply_logit_scale(-volume, logit_scale)
 
     labels = torch.arange(logits.shape[0], device=logits.device)
 

@@ -1,0 +1,35 @@
+defaults:
+  - _self_
+
+monitor:
+  metric: "val/acc_top1"
+  mode: "max"
+
+max_waveform_windows: 10
+
+radiology:
+  text_model_id: "bert-base-uncased"
+  max_length: 256
+  use_pretrain_bert: True
+  freeze_pretrained_bert: True
+  cache_dir: "/sc-projects/sc-proj-ukb-cvd/projects/data/tmp_hf_cache"
+  local_files_only: False
+  proj_hidden_dim: 512
+
+numerics:
+  stem_kernel_sizes: [5, 5, 5]
+  stem_strides: [2, 2, 2]
+  transformer:
+    d_model: 256
+    nhead: 1
+    num_layers: 2
+    dropout: 0.0
+
+waveform_ii:
+  stem_kernel_sizes: [5]
+  stem_strides: [2]
+  transformer:
+    d_model: 256
+    nhead: 1
+    num_layers: 2
+    dropout: 0.0
