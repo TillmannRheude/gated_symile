@@ -349,6 +349,8 @@ class LightningModuleParent(pl.LightningModule):
         if names is None or len(names) != M:
             names = [f"m{i}" for i in range(M)]
 
+        if gate.neutral is None:
+            return
         # gate.neutral is on (M,D); broadcast to (B,D) per modality
         N = gate.neutral.to(device=gated_list[0].device, dtype=gated_list[0].dtype)
 

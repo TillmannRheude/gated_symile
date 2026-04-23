@@ -43,6 +43,8 @@ class SymileMIMICModel(LightningModuleParent):
                 gate_type=self.params_method["gate_type"],
                 gate_mode=self.params_method["gate_mode"],
                 neutral_type=self.params_method["neutral_type"],
+                use_null=self.params_method["use_null"],
+                renormalize=self.params_method["renormalize"]
             )
         else:
             self.gate = None

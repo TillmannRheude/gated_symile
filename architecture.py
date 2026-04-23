@@ -140,7 +140,10 @@ class ModalityAttentionGate(nn.Module):
 
                 s_t = scores[:, t, mask]  # fp32
 
-                null_raw = (self.null_head(E[:, t, :]).squeeze(-1) + self.null_logit[t].float()) / temp  # fp32
+                if self.use_null:
+                    null_raw = (self.null_head(E[:, t, :]).squeeze(-1) + self.null_logit[t].float()) / temp  # fp32
+                else:
+                    null_raw = (self.null_head(E[:, t, :]).squeeze(-1) / temp)  # fp32
 
                 if self.gate_type == "softmax":
                     if self.use_null:
@@ -190,7 +193,6 @@ class ModalityAttentionGate(nn.Module):
             G = F.normalize(G, dim=2, eps=self.eps)
 
         gated_list = [G[:, m, :] for m in range(self.M)]
-        self._maybe_save_pca_plot(target_idx=int(target_idx), embeddings=embeddings, gated_list=gated_list, w=w)
         return gated_list, w, W
 
 class Contrastive_Model(nn.Module):
