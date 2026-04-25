@@ -13,6 +13,8 @@ from torchmetrics.aggregation import MinMetric
 
 from losses.clip import clip
 from losses.symile import symile, symile_gated
+from losses.triangle import triangle
+from losses.gram import gram
 
 class LightningModuleParent(pl.LightningModule):
     def __init__(
@@ -81,6 +83,10 @@ class LightningModuleParent(pl.LightningModule):
             self.loss = symile if not self.use_gate else symile_gated
         elif modelname == "clip":
             self.loss = clip
+        elif modelname == "triangle":
+            self.loss = triangle
+        elif modelname == "gram":
+            self.loss = gram
 
         self.save_hyperparameters()
 
