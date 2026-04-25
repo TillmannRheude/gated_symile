@@ -5,3 +5,13 @@ def scale_mip_dvs(score_matrix, d, M):
     """
     scale_base = d ** ((M - 1) / 2)
     return score_matrix * scale_base
+
+
+
+def apply_logit_scale(logits, logit_scale):
+    """
+    Multiply logits by `logit_scale` when provided; otherwise leave them unchanged.
+    """
+    if logit_scale is None:
+        return logits
+    return logit_scale * logits
