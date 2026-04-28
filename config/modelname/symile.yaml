@@ -1,6 +1,6 @@
 modelname: symile
 
-emb_dim: 512
+emb_dim: 3072
 
 negative_sampling: pair  # n, n_squared, pair
 logit_scale_init: -2.65926  # 0

@@ -78,7 +78,7 @@ def build_model(cfg: dict):
                 contrastive_model=model,
                 transformer_params=cfg["modelname"]["transformer_params"],
                 proj_output_dim=1,
-                seq_dims=[4,8,1]
+                seq_dims=[1,1,1]
             )
 
         return SymileMIMICModel(
@@ -232,6 +232,7 @@ def build_model(cfg: dict):
                 dropout=cfg["encoders"]["numerics"]["transformer"]["dropout"],
                 stem_kernel_sizes=cfg["encoders"]["numerics"].get("stem_kernel_sizes", [5, 5, 5]),
                 stem_strides=cfg["encoders"]["numerics"].get("stem_strides", [2, 2, 2]),
+                trend_feature_dim=cfg["encoders"]["numerics"].get("trend_feature_dim", 7),
             ),
         ])
         model = Contrastive_Model(encoders=encoders)

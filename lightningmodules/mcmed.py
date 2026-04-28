@@ -75,6 +75,18 @@ class MCMEDModel(LightningModuleParent):
         return ~torch.isnan(x).reshape(batch_size, -1).all(dim=1)
 
     @staticmethod
+    def _waveform_present(batch_waveforms: dict) -> torch.Tensor:
+        if "bin_mask" in batch_waveforms:
+            return batch_waveforms["bin_mask"].to(dtype=torch.bool).any(dim=1)
+        return MCMEDModel._tensor_modality_present(batch_waveforms["windows"])
+
+    @staticmethod
+    def _numerics_present(batch_numerics: dict) -> torch.Tensor:
+        if "bin_counts" in batch_numerics:
+            return batch_numerics["bin_counts"].to(dtype=torch.long).gt(0).any(dim=1)
+        return MCMEDModel._tensor_modality_present(batch_numerics["values"])
+
+    @staticmethod
     def _normalize_report_texts(batch_texts) -> list[str]:
         normalized = []
         for sample_texts in batch_texts:
@@ -92,8 +104,8 @@ class MCMEDModel(LightningModuleParent):
         return torch.tensor([len(text) > 0 for text in normalized], dtype=torch.bool, device=self.device)
 
     def _query_keep_mask(self, batch) -> torch.Tensor:
-        waveform_present = self._tensor_modality_present(batch["waveforms_II"]["windows"].to(self.device))
-        numerics_present = self._tensor_modality_present(batch["numerics"]["values"].to(self.device))
+        waveform_present = self._waveform_present(batch["waveforms_II"]).to(self.device)
+        numerics_present = self._numerics_present(batch["numerics"]).to(self.device)
         rads_present = self._radiology_present(batch["rads"]["impression_texts"])
         return waveform_present & numerics_present & rads_present
 

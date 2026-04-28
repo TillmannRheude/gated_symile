@@ -4,6 +4,87 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+class ProductPreservingActivation(nn.Module):
+    """
+    A near-identity activation designed to perturb coordinates gently instead of
+    replacing them aggressively.
+
+    Modes:
+      - "additive":      f(x) = x + alpha * tanh(beta * x)
+      - "multiplicative": f(x) = x * (1 + alpha * tanh(beta * x))
+
+    The multiplicative mode is the more geometry-preserving default for
+    product-sensitive objectives like Symile/MIP.
+    """
+    def __init__(
+        self,
+        alpha_init: float = 0.05,
+        beta_init: float = 1.0,
+        learnable_alpha: bool = True,
+        learnable_beta: bool = True,
+        mode: str = "multiplicative",
+    ):
+        super().__init__()
+        if mode not in {"additive", "multiplicative"}:
+            raise ValueError(f"Unknown mode: {mode}. Expected 'additive' or 'multiplicative'.")
+
+        self.mode = str(mode)
+        self.alpha = nn.Parameter(torch.tensor(float(alpha_init))) if learnable_alpha else None
+        self.beta = nn.Parameter(torch.tensor(float(beta_init))) if learnable_beta else None
+
+        if not learnable_alpha:
+            self.register_buffer("_alpha_const", torch.tensor(float(alpha_init)))
+        if not learnable_beta:
+            self.register_buffer("_beta_const", torch.tensor(float(beta_init)))
+
+    def extra_repr(self) -> str:
+        return f"mode={self.mode!r}, learnable_alpha={self.alpha is not None}, learnable_beta={self.beta is not None}"
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        alpha = self.alpha if self.alpha is not None else self._alpha_const
+        beta = self.beta if self.beta is not None else self._beta_const
+
+        perturb = torch.tanh(beta * x)
+        if self.mode == "additive":
+            return x + alpha * perturb
+        return x * (1.0 + alpha * perturb)
+
+
+class ExponentialModulationActivation(nn.Module):
+    """
+    A smooth near-identity multiplicative activation:
+
+        f(x) = x * exp(alpha * tanh(beta * x))
+
+    This preserves sign, keeps every coordinate alive, and modulates each
+    feature by a bounded smooth gain. For alpha=0 it is exactly the identity.
+    """
+    def __init__(
+        self,
+        alpha_init: float = 0.05,
+        beta_init: float = 1.0,
+        learnable_alpha: bool = True,
+        learnable_beta: bool = True,
+    ):
+        super().__init__()
+        self.alpha = nn.Parameter(torch.tensor(float(alpha_init))) if learnable_alpha else None
+        self.beta = nn.Parameter(torch.tensor(float(beta_init))) if learnable_beta else None
+
+        if not learnable_alpha:
+            self.register_buffer("_alpha_const", torch.tensor(float(alpha_init)))
+        if not learnable_beta:
+            self.register_buffer("_beta_const", torch.tensor(float(beta_init)))
+
+    def extra_repr(self) -> str:
+        return f"learnable_alpha={self.alpha is not None}, learnable_beta={self.beta is not None}"
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        alpha = self.alpha if self.alpha is not None else self._alpha_const
+        beta = self.beta if self.beta is not None else self._beta_const
+        gain = torch.exp(alpha * torch.tanh(beta * x))
+        return x * gain
+
+
 class SigmoidSelfAttention(nn.Module):
     def __init__(self, d_model, nhead, dropout=0.0):
         super().__init__()
