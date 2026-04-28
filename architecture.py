@@ -252,7 +252,7 @@ class TransformerSymile(nn.Module):
         else:
             self.register_tokens = None
 
-        sigmoid_transformer = False
+        sigmoid_transformer = True
         if not sigmoid_transformer:
             encoder_layer = nn.TransformerEncoderLayer(
                 d_model=d_model,
@@ -268,7 +268,7 @@ class TransformerSymile(nn.Module):
             encoder_layer = SigmoidTransformerEncoderLayer(
                 d_model=d_model,
                 nhead=transformer_params["nhead"],
-                dim_feedforward=d_model * 4,
+                dim_feedforward=d_model,
                 dropout=transformer_params["dropout"],
             )
         self.transformer = nn.TransformerEncoder(
@@ -287,9 +287,9 @@ class TransformerSymile(nn.Module):
         #self.linear = nn.Linear(d_model, proj_output_dim)
 
         self.apply(self._init_weights)
-        for layer in self.transformer.layers:
-            for sublayer in layer.modules():
-                mimetic_init_svd_(sublayer)
+        #for layer in self.transformer.layers:
+        #    for sublayer in layer.modules():
+        #        mimetic_init_svd_(sublayer)
         
         if self.num_register_tokens > 0:
             nn.init.normal_(self.register_tokens, mean=0.0, std=0.02)

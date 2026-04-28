@@ -1,14 +1,35 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from torchvision import models
 from transformers import AutoModel, BertConfig, BertModel, BertTokenizer
 
 
+def _init_linear_near_identity_(layer: nn.Linear, noise_scale: float = 1e-3) -> None:
+    """
+    Initialize a Linear layer as the closest identity-like map allowed by its
+    shape, plus tiny noise.
+    """
+    if not isinstance(layer, nn.Linear):
+        raise TypeError("Expected nn.Linear in _init_linear_near_identity_.")
+
+    with torch.no_grad():
+        layer.weight.zero_()
+        k = min(layer.out_features, layer.in_features)
+        layer.weight[:k, :k] = torch.eye(
+            k, device=layer.weight.device, dtype=layer.weight.dtype
+        )
+        if noise_scale > 0.0:
+            layer.weight.add_(noise_scale * torch.randn_like(layer.weight))
+        if layer.bias is not None:
+            layer.bias.zero_()
+
+
 """
 Symile-MIMIC 
 """
-class CXREncoder_ResNet(nn.Module):
+class CXREncoder(nn.Module):
     def __init__(
         self,
         resnet_params: dict = {
@@ -25,12 +46,20 @@ class CXREncoder_ResNet(nn.Module):
 
         nn.init.kaiming_normal_(self.resnet.fc.weight, mode="fan_out")
         nn.init.zeros_(self.resnet.fc.bias)
+        self.init_near_identity_()
+
+    def init_near_identity_(self, noise_scale: float = 1e-3) -> None:
+        """
+        Make the final projection head of the ResNet start as a near-identity
+        padded/truncated map.
+        """
+        _init_linear_near_identity_(self.resnet.fc, noise_scale=noise_scale)
 
     def forward(self, x):
         x = self.resnet(x)
         return x
 
-class ECGEncoder_ResNet(nn.Module):
+class ECGEncoder(nn.Module):
     def __init__(
         self, 
         resnet_params: dict = {
@@ -49,12 +78,20 @@ class ECGEncoder_ResNet(nn.Module):
         nn.init.kaiming_normal_(self.resnet.fc.weight, mode="fan_out")
         nn.init.zeros_(self.resnet.fc.bias)
         nn.init.kaiming_normal_(self.resnet.conv1.weight, mode="fan_out")
+        self.init_near_identity_()
+
+    def init_near_identity_(self, noise_scale: float = 1e-3) -> None:
+        """
+        Make the final projection head of the ResNet start as a near-identity
+        padded/truncated map.
+        """
+        _init_linear_near_identity_(self.resnet.fc, noise_scale=noise_scale)
 
     def forward(self, x):
         x = self.resnet(x)
         return x
 
-class LabsEncoder_ResNet(nn.Module):
+class LabsEncoder(nn.Module):
     def __init__(
         self,
         emb_dim: int = 8192,
@@ -68,6 +105,7 @@ class LabsEncoder_ResNet(nn.Module):
         self.gelu = nn.GELU()
 
         self.apply(self._init_weights)
+        self.init_near_identity_()
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -81,6 +119,15 @@ class LabsEncoder_ResNet(nn.Module):
         elif isinstance(m, nn.LayerNorm):
             nn.init.ones_(m.weight)
             nn.init.zeros_(m.bias)
+
+    def init_near_identity_(self, noise_scale: float = 1e-3) -> None:
+        """
+        Initialize the plain labs MLP as a near-identity stack while keeping
+        the GELU activations in place.
+        """
+        _init_linear_near_identity_(self.fc1, noise_scale=noise_scale)
+        _init_linear_near_identity_(self.fc2, noise_scale=noise_scale)
+        _init_linear_near_identity_(self.fc3, noise_scale=noise_scale)
 
     def forward(self, x):
         # freeze all layers
@@ -207,7 +254,7 @@ class LabsEncoder_EF(nn.Module):
         return x
 
 
-class CXREncoder(nn.Module):
+class CXREncoder_Hybrid(nn.Module):
     def __init__(
         self,
         resnet_params: dict = {
@@ -270,7 +317,7 @@ class CXREncoder(nn.Module):
         residual_tokens = self.residual_drop(self.residual_branch_norm(residual_tokens))
         return torch.cat([strong, residual_tokens], dim=1)
 
-class ECGEncoder(nn.Module):
+class ECGEncoder_Hybrid(nn.Module):
     def __init__(
         self,
         resnet_params: dict = {
@@ -335,7 +382,7 @@ class ECGEncoder(nn.Module):
         residual_tokens = self.residual_drop(self.residual_branch_norm(residual_tokens))
         return torch.cat([strong, residual_tokens], dim=1)
 
-class LabsEncoder(nn.Module):
+class LabsEncoder_Hybrid(nn.Module):
     def __init__(
         self,
         emb_dim: int = 8192,
@@ -506,9 +553,9 @@ class UKBTabularEncoder(nn.Module):
         if self.combine_eids_as == "union":
             # also pass binary missing mask as input to the MLP
             input_dim = input_dim * 2
-        self.residual_proj = nn.Linear(input_dim, emb_dim, bias=True)
-        self.residual_drop = nn.Dropout(float(hidden_dropouts[0] / 2))
-        self.residual_norm = nn.LayerNorm(emb_dim)
+        #self.residual_proj = nn.Linear(input_dim, emb_dim, bias=True)
+        #self.residual_drop = nn.Dropout(float(hidden_dropouts[0] / 2))
+        #self.residual_norm = nn.LayerNorm(emb_dim)
 
         layers = []
         prev = input_dim
@@ -522,7 +569,8 @@ class UKBTabularEncoder(nn.Module):
         self.mlp = nn.Sequential(*layers)
 
         self.apply(self._init_weights)
-        self.init_residual_identity_()
+        self.init_near_identity_(noise_scale=1e-3)
+        #self.init_residual_identity_()
 
         if shared_adapter is not None:
             self.mlp = nn.Sequential(
@@ -582,6 +630,16 @@ class UKBTabularEncoder(nn.Module):
                 k_last, device=last.weight.device, dtype=last.weight.dtype
             )
 
+    def init_near_identity_(self, noise_scale: float = 1e-3) -> None:
+        """
+        Initialize the plain labs MLP as a near-identity stack while keeping
+        the GELU activations in place.
+        """
+        _init_linear_near_identity_(self.mlp[0], noise_scale=noise_scale)
+        _init_linear_near_identity_(self.mlp[4], noise_scale=noise_scale)
+        _init_linear_near_identity_(self.mlp[8], noise_scale=noise_scale)
+        _init_linear_near_identity_(self.mlp[12], noise_scale=noise_scale)
+
     def forward(self, x):
         if self.combine_eids_as == "union":
             nanmask = torch.isnan(x).float()
@@ -591,8 +649,8 @@ class UKBTabularEncoder(nn.Module):
             # raise ValueError("NaN values present in input")
             x = torch.nan_to_num(x, nan=0.0)
         
-        residual = self.residual_drop(self.residual_norm(self.residual_proj(x)))
-        return residual + self.mlp(x)
+        #residual = self.residual_drop(self.residual_norm(self.residual_proj(x)))
+        return self.mlp(x)
 
 class UKBTabularEncoder_EF(nn.Module):
     def __init__(
@@ -661,6 +719,162 @@ class UKBTabularEncoder_EF(nn.Module):
 Synthetic XNOR
 """
 class SyntheticXNOREncoder(nn.Module):
+    def __init__(
+        self,
+        input_dim: int = 128,
+        emb_dim: int = 8192,
+    ):
+        super().__init__()
+        self.input_dim = int(input_dim)
+        self.emb_dim = emb_dim
+
+        self.residual_proj = nn.Linear(input_dim, emb_dim)
+
+        self.mlp = nn.Sequential(
+            nn.Linear(input_dim, emb_dim),
+            nn.ReLU(),
+            nn.Linear(emb_dim, emb_dim),
+            nn.ReLU(),
+            nn.Linear(emb_dim, emb_dim)
+        )
+        # self.apply(self._init_weights)
+
+        self.init_near_identity_(noise_scale=1e-3)
+        # self.init_residual_identity_()
+    
+    def _init_weights(
+        self,
+        m
+    ) -> None: 
+        if isinstance(m, (torch.nn.LayerNorm)):
+            torch.nn.init.constant_(m.weight, 1)
+            torch.nn.init.constant_(m.bias, 0)
+        elif isinstance(m, torch.nn.Linear):
+            torch.nn.init.kaiming_normal_(m.weight, mode="fan_out")
+            if m.bias is not None:
+                torch.nn.init.zeros_(m.bias)
+        elif isinstance(m, torch.nn.BatchNorm2d):
+            torch.nn.init.ones_(m.weight)
+            torch.nn.init.zeros_(m.bias)
+
+    @staticmethod
+    def _init_linear_near_identity_(
+        layer: nn.Linear,
+        noise_scale: float = 1e-3,
+    ) -> None:
+        """
+        Initialize a Linear layer as the closest identity-like map allowed by
+        its shape, plus a tiny perturbation.
+
+        For non-square layers this becomes a padded/truncated identity. This is
+        useful when input_dim != emb_dim but we still want to preserve input
+        geometry as much as possible at initialization.
+        """
+        if not isinstance(layer, nn.Linear):
+            raise TypeError("Expected nn.Linear in _init_linear_near_identity_.")
+
+        with torch.no_grad():
+            layer.weight.zero_()
+            k = min(layer.out_features, layer.in_features)
+            layer.weight[:k, :k] = torch.eye(
+                k, device=layer.weight.device, dtype=layer.weight.dtype
+            )
+            if noise_scale > 0.0:
+                layer.weight.add_(noise_scale * torch.randn_like(layer.weight))
+            if layer.bias is not None:
+                layer.bias.zero_()
+
+    def init_identity_(self) -> None:
+        """
+        Reconfigure the MLP to be an identity-like map.
+
+        The ReLU activations are replaced by Identity modules. The first Linear
+        layer is initialized as a padded/truncated identity when
+        input_dim != emb_dim, while the remaining square Linear layers are set
+        to exact identity.
+        """
+        if not isinstance(self.mlp[0], nn.Linear) or not isinstance(self.mlp[2], nn.Linear) or not isinstance(self.mlp[4], nn.Linear):
+            raise TypeError("SyntheticXNOREncoder.mlp does not have the expected Linear/ReLU/Linear/ReLU/Linear structure.")
+
+        self.mlp[1] = nn.Identity()
+        self.mlp[3] = nn.Identity()
+
+        with torch.no_grad():
+            first = self.mlp[0]
+            first.weight.zero_()
+            k = min(first.out_features, first.in_features)
+            first.weight[:k, :k] = torch.eye(k, device=first.weight.device, dtype=first.weight.dtype)
+            if first.bias is not None:
+                first.bias.zero_()
+
+            for idx in (2, 4):
+                layer = self.mlp[idx]
+                layer.weight.zero_()
+                layer.weight.add_(torch.eye(layer.out_features, device=layer.weight.device, dtype=layer.weight.dtype))
+                if layer.bias is not None:
+                    layer.bias.zero_()
+
+    def init_near_identity_(self, noise_scale: float = 1e-3) -> None:
+        """
+        Initialize the plain MLP path as a near-identity map.
+
+        This keeps the ReLU activations in place, but makes every Linear layer
+        start as the closest identity-like transform allowed by its shape,
+        perturbed only by tiny noise.
+        """
+        if not isinstance(self.mlp[0], nn.Linear) or not isinstance(self.mlp[2], nn.Linear) or not isinstance(self.mlp[4], nn.Linear):
+            raise TypeError("SyntheticXNOREncoder.mlp does not have the expected Linear/ReLU/Linear/ReLU/Linear structure.")
+
+        for idx in (0, 2, 4):
+            self._init_linear_near_identity_(self.mlp[idx], noise_scale=noise_scale)
+
+    def init_residual_identity_(self, branch_scale: float = 1e-3) -> None:
+        """
+        Initialize the residual encoder so the shortcut carries an identity-like
+        map and the nonlinear MLP branch starts near zero.
+
+        This is useful for residual formulations like:
+            y = residual_proj(x) + mlp(x)
+        where we want to preserve input geometry at initialization while still
+        keeping a trainable nonlinear branch.
+        """
+        if not isinstance(self.residual_proj, nn.Linear):
+            raise TypeError("SyntheticXNOREncoder.residual_proj is expected to be a Linear layer.")
+        if not isinstance(self.mlp[0], nn.Linear) or not isinstance(self.mlp[2], nn.Linear) or not isinstance(self.mlp[4], nn.Linear):
+            raise TypeError("SyntheticXNOREncoder.mlp does not have the expected Linear/Act/Linear/Act/Linear structure.")
+
+        with torch.no_grad():
+            proj = self.residual_proj
+            proj.weight.zero_()
+            k = min(proj.out_features, proj.in_features)
+            proj.weight[:k, :k] = torch.eye(k, device=proj.weight.device, dtype=proj.weight.dtype)
+            if proj.bias is not None:
+                proj.bias.zero_()
+
+            for idx in (0, 2, 4):
+                layer = self.mlp[idx]
+                layer.weight.zero_()
+                if layer.bias is not None:
+                    layer.bias.zero_()
+
+            # Keep a tiny non-zero branch so gradients can start shaping it,
+            # while the residual path dominates at initialization.
+            first = self.mlp[0]
+            last = self.mlp[4]
+            k_first = min(first.out_features, first.in_features)
+            k_last = min(last.out_features, last.in_features)
+            first.weight[:k_first, :k_first] = branch_scale * torch.eye(
+                k_first, device=first.weight.device, dtype=first.weight.dtype
+            )
+            last.weight[:k_last, :k_last] = branch_scale * torch.eye(
+                k_last, device=last.weight.device, dtype=last.weight.dtype
+            )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.mlp(x)  # self.residual_proj(x) + 
+
+
+class SyntheticXNOREncoder_Res(nn.Module):
     def __init__(
         self,
         input_dim: int = 128,
@@ -773,8 +987,6 @@ class SyntheticXNOREncoder(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.residual_proj(x) + self.mlp(x)
 
-
-
 """
 MC-MED
 """
@@ -861,8 +1073,17 @@ class MCMEDWaveformEncoder(nn.Module):
             nn.init.ones_(m.weight)
             nn.init.zeros_(m.bias)
 
-    def _build_key_padding_mask(self, batch_size: int, num_windows: int, lengths, device) -> torch.Tensor:
-        if lengths is not None:
+    def _build_key_padding_mask(
+        self,
+        batch_size: int,
+        num_windows: int,
+        lengths,
+        device,
+        valid_mask: torch.Tensor = None,
+    ) -> torch.Tensor:
+        if valid_mask is not None:
+            window_mask = ~valid_mask.to(device=device, dtype=torch.bool)
+        elif lengths is not None:
             lengths = lengths.to(device=device)
             window_mask = torch.arange(num_windows, device=device).unsqueeze(0) >= lengths.unsqueeze(1)
         else:
@@ -888,10 +1109,19 @@ class MCMEDWaveformEncoder(nn.Module):
             out = torch.clamp(out, min=0)
         return out
 
+    def _downsample_valid_mask(self, valid_mask: torch.Tensor) -> torch.Tensor:
+        out = valid_mask.to(dtype=torch.float32).unsqueeze(1)
+        for kernel_size, stride in zip(self.stem_kernel_sizes, self.stem_strides):
+            padding = kernel_size // 2
+            out = F.max_pool1d(out, kernel_size=kernel_size, stride=stride, padding=padding)
+        return out.squeeze(1) > 0.5
+
     def forward(self, x):
         lengths = None
+        valid_mask = None
         if isinstance(x, dict):
             lengths = x.get("lengths")
+            valid_mask = x.get("bin_mask")
             x = x["windows"]
 
         if x.ndim != 4:
@@ -915,16 +1145,22 @@ class MCMEDWaveformEncoder(nn.Module):
             x = self.temporal_stem(x)
             x = x.transpose(1, 2)
             num_windows = x.shape[1]
-            if lengths is not None:
+            if valid_mask is not None:
+                valid_mask = self._downsample_valid_mask(valid_mask.to(device=x.device))
+            elif lengths is not None:
                 lengths = self._downsample_lengths(lengths.to(device=x.device))
 
         cls_token = self.cls_token.expand(batch_size, -1, -1)
         x = torch.cat([cls_token, x], dim=1)
         x = self._add_positional_embeddings(x)
 
-        key_padding_mask = self._build_key_padding_mask(batch_size, num_windows, lengths, x.device)
-
-        print("Waveform, x shape: ", x.shape)
+        key_padding_mask = self._build_key_padding_mask(
+            batch_size,
+            num_windows,
+            lengths,
+            x.device,
+            valid_mask=valid_mask,
+        )
         x = self.transformer(x, src_key_padding_mask=key_padding_mask)
         x = self.proj(x[:, 0])
         return x
@@ -1013,16 +1249,22 @@ class MCMEDNumericsEncoder(nn.Module):
         max_seq_len: int = 2048,
         stem_kernel_sizes: tuple[int, ...] = (5, 5, 5),
         stem_strides: tuple[int, ...] = (2, 2, 2),
+        trend_feature_dim: int = 7,
     ):
         super().__init__()
         self.input_dim = int(input_dim)
         self.emb_dim = int(emb_dim)
         self.d_model = int(d_model)
+        self.trend_feature_dim = int(trend_feature_dim)
 
         if len(stem_kernel_sizes) != len(stem_strides):
             raise ValueError("stem_kernel_sizes and stem_strides must have the same length.")
 
-        self.input_proj = nn.Linear(self.input_dim * 2, d_model)
+        self.raw_input_proj = nn.Linear(self.input_dim * 2, d_model)
+        self.trend_input_proj = nn.Linear(
+            (self.input_dim * self.trend_feature_dim) + self.input_dim + 1,
+            d_model,
+        )
         stem_layers = []
         for kernel_size, stride in zip(stem_kernel_sizes, stem_strides):
             padding = int(kernel_size) // 2
@@ -1085,27 +1327,62 @@ class MCMEDNumericsEncoder(nn.Module):
             out = torch.clamp(out, min=0)
         return out
 
+    def _downsample_valid_mask(self, valid_mask: torch.Tensor) -> torch.Tensor:
+        out = valid_mask.to(dtype=torch.float32).unsqueeze(1)
+        for kernel_size, stride in zip(self.stem_kernel_sizes, self.stem_strides):
+            padding = kernel_size // 2
+            out = F.max_pool1d(out, kernel_size=kernel_size, stride=stride, padding=padding)
+        return out.squeeze(1) > 0.5
+
     def forward(self, x):
+        valid_mask = None
         if isinstance(x, dict):
-            values = x["values"]
-            mask = x.get("mask")
-            lengths = x.get("lengths")
+            if "trend_values" in x:
+                trend_values = x["trend_values"]
+                measure_mask = x["measure_mask"]
+                bin_counts = x["bin_counts"]
+                if trend_values.ndim != 4 or trend_values.size(2) != self.input_dim or trend_values.size(3) != self.trend_feature_dim:
+                    raise ValueError(
+                        f"Expected trend_values with shape [B, T, {self.input_dim}, {self.trend_feature_dim}], got {tuple(trend_values.shape)}"
+                    )
+
+                batch_size, seq_len, _, _ = trend_values.shape
+                valid_mask = (bin_counts > 0)
+                trend_values = trend_values.reshape(batch_size, seq_len, self.input_dim * self.trend_feature_dim)
+                measure_mask = measure_mask.float()
+                bin_counts = bin_counts.float().unsqueeze(-1)
+                x = torch.cat([trend_values, measure_mask, bin_counts], dim=-1)
+                x = self.trend_input_proj(x)
+                lengths = None
+            else:
+                values = x["values"]
+                mask = x.get("mask")
+                lengths = x.get("lengths")
+
+                if values.ndim != 3 or values.size(-1) != self.input_dim:
+                    raise ValueError(f"Expected numerics input with shape [B, T, {self.input_dim}], got {tuple(values.shape)}")
+
+                batch_size, seq_len, _ = values.shape
+                if mask is None:
+                    mask = ~torch.isnan(values)
+                mask = mask.float()
+                values = torch.nan_to_num(values, nan=0.0)
+
+                x = torch.cat([values, mask], dim=-1)
+                x = self.raw_input_proj(x)
         else:
             values = x
             mask = None
             lengths = None
-
-        if values.ndim != 3 or values.size(-1) != self.input_dim:
-            raise ValueError(f"Expected numerics input with shape [B, T, {self.input_dim}], got {tuple(values.shape)}")
-
-        batch_size, seq_len, _ = values.shape
-        if mask is None:
-            mask = ~torch.isnan(values)
-        mask = mask.float()
-        values = torch.nan_to_num(values, nan=0.0)
-
-        x = torch.cat([values, mask], dim=-1)
-        x = self.input_proj(x)
+            if values.ndim != 3 or values.size(-1) != self.input_dim:
+                raise ValueError(f"Expected numerics input with shape [B, T, {self.input_dim}], got {tuple(values.shape)}")
+            batch_size, seq_len, _ = values.shape
+            if mask is None:
+                mask = ~torch.isnan(values)
+            mask = mask.float()
+            values = torch.nan_to_num(values, nan=0.0)
+            x = torch.cat([values, mask], dim=-1)
+            x = self.raw_input_proj(x)
         if seq_len == 0:
             x = x.new_empty((batch_size, 0, self.d_model))
         else:
@@ -1113,22 +1390,24 @@ class MCMEDNumericsEncoder(nn.Module):
             x = self.temporal_stem(x)
             x = x.transpose(1, 2)
             seq_len = x.shape[1]
-            if lengths is not None:
+            if valid_mask is not None:
+                valid_mask = self._downsample_valid_mask(valid_mask.to(device=x.device))
+            elif lengths is not None:
                 lengths = self._downsample_lengths(lengths.to(device=x.device))
 
         cls_token = self.cls_token.expand(batch_size, -1, -1)
         x = torch.cat([cls_token, x], dim=1)
         x = self._add_positional_embeddings(x)
 
-        if lengths is not None:
+        if valid_mask is not None:
+            token_pad_mask = ~valid_mask.to(device=x.device, dtype=torch.bool)
+        elif lengths is not None:
             lengths = lengths.to(device=x.device)
             token_pad_mask = torch.arange(seq_len, device=x.device).unsqueeze(0) >= lengths.unsqueeze(1)
         else:
             token_pad_mask = torch.zeros(batch_size, seq_len, dtype=torch.bool, device=x.device)
         cls_pad_mask = torch.zeros(batch_size, 1, dtype=torch.bool, device=x.device)
         key_padding_mask = torch.cat([cls_pad_mask, token_pad_mask], dim=1)
-
-        print("Numerics, x shape: ", x.shape)
 
         x = self.transformer(x, src_key_padding_mask=key_padding_mask)
         return self.proj(x[:, 0])

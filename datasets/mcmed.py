@@ -94,13 +94,28 @@ class MCMEDDataset(Dataset):
         self.numerics_stats = json.loads(
             (self.root_dir / "metadata" / f"numerics_stats_{split_family}.json").read_text()
         )
+        numerics_trend_schema_path = self.root_dir / "metadata" / "numerics_trend_schema.json"
+        waveforms_fixedbins_schema_path = self.root_dir / "metadata" / "waveforms_fixedbins_schema.json"
+        self.numerics_trend_schema = json.loads(numerics_trend_schema_path.read_text()) if numerics_trend_schema_path.exists() else None
+        self.waveforms_fixedbins_schema = json.loads(waveforms_fixedbins_schema_path.read_text()) if waveforms_fixedbins_schema_path.exists() else None
 
         base = pd.read_csv(self.root_dir / "manifests" / f"{split_family}_{split_name}_labels.csv")
         base["CSN"] = base["CSN"].astype("int64")
         base = base[["CSN"]].copy()
 
-        for modality in ["visits_static", "numerics", "rads"]:
-            manifest = pd.read_csv(self.root_dir / "manifests" / f"{split_family}_{split_name}_{modality}.csv")
+        self.use_numerics_trend = (self.root_dir / "manifests" / f"{split_family}_{split_name}_numerics_trend.csv").exists()
+        numerics_manifest_name = (
+            f"{split_family}_{split_name}_numerics_trend.csv"
+            if self.use_numerics_trend
+            else f"{split_family}_{split_name}_numerics.csv"
+        )
+
+        for modality, manifest_name in [
+            ("visits_static", f"{split_family}_{split_name}_visits_static.csv"),
+            ("numerics", numerics_manifest_name),
+            ("rads", f"{split_family}_{split_name}_rads.csv"),
+        ]:
+            manifest = pd.read_csv(self.root_dir / "manifests" / manifest_name)
             manifest["CSN"] = manifest["CSN"].astype("int64")
             manifest = manifest[["CSN", "relative_path", "exists"]].rename(
                 columns={
@@ -111,18 +126,22 @@ class MCMEDDataset(Dataset):
             base = base.merge(manifest, on="CSN", how="left")
 
         if use_waveforms:
-            for waveform in ["II", "Pleth", "Resp"]:
-                manifest_path = self.root_dir / "manifests" / f"{split_family}_{split_name}_waveforms_{waveform}.csv"
-                if manifest_path.exists():
-                    manifest = pd.read_csv(manifest_path)
-                    manifest["CSN"] = manifest["CSN"].astype("int64")
-                    manifest = manifest[["CSN", "relative_path", "exists"]].rename(
-                        columns={
-                            "relative_path": f"waveforms_{waveform}_path",
-                            "exists": f"waveforms_{waveform}_exists",
-                        }
-                    )
-                    base = base.merge(manifest, on="CSN", how="left")
+            fixedbins_manifest_path = self.root_dir / "manifests" / f"{split_family}_{split_name}_waveforms_II_fixedbins.csv"
+            raw_manifest_path = self.root_dir / "manifests" / f"{split_family}_{split_name}_waveforms_II.csv"
+            self.use_waveform_fixedbins = fixedbins_manifest_path.exists()
+            manifest_path = fixedbins_manifest_path if self.use_waveform_fixedbins else raw_manifest_path
+            if manifest_path.exists():
+                manifest = pd.read_csv(manifest_path)
+                manifest["CSN"] = manifest["CSN"].astype("int64")
+                manifest = manifest[["CSN", "relative_path", "exists"]].rename(
+                    columns={
+                        "relative_path": "waveforms_II_path",
+                        "exists": "waveforms_II_exists",
+                    }
+                )
+                base = base.merge(manifest, on="CSN", how="left")
+        else:
+            self.use_waveform_fixedbins = False
 
         labels_path = self.root_dir / "labels" / "labels.csv"
         labels = pd.read_csv(labels_path)
@@ -176,7 +195,26 @@ class MCMEDDataset(Dataset):
                     "chief_complaint": str(data["chief_complaint"].item()),
                 }
 
-        if pd.notna(row.get("numerics_path")) and bool(row.get("numerics_exists", 0)):
+        if self.use_numerics_trend:
+            num_bins = int(self.numerics_trend_schema["num_bins"]) if self.numerics_trend_schema is not None else 32
+            num_features = int(len(self.numerics_trend_schema["feature_names"])) if self.numerics_trend_schema is not None else 7
+            sample["numerics"] = {
+                "trend_values": np.zeros((num_bins, 12, num_features), dtype=np.float32),
+                "measure_mask": np.zeros((num_bins, 12), dtype=bool),
+                "bin_counts": np.zeros((num_bins,), dtype=np.int32),
+                "bin_centers_minutes": np.zeros((num_bins,), dtype=np.float32),
+                "bin_edges_minutes": np.zeros((num_bins + 1,), dtype=np.float32),
+            }
+            if pd.notna(row.get("numerics_path")) and bool(row.get("numerics_exists", 0)):
+                with np.load(self.root_dir / row["numerics_path"], allow_pickle=False) as data:
+                    sample["numerics"] = {
+                        "trend_values": data["trend_values"].astype(np.float32),
+                        "measure_mask": data["measure_mask"].astype(bool),
+                        "bin_counts": data["bin_counts"].astype(np.int32),
+                        "bin_centers_minutes": data["bin_centers_minutes"].astype(np.float32),
+                        "bin_edges_minutes": data["bin_edges_minutes"].astype(np.float32),
+                    }
+        elif pd.notna(row.get("numerics_path")) and bool(row.get("numerics_exists", 0)):
             with np.load(self.root_dir / row["numerics_path"], allow_pickle=False) as data:
                 values = data["values"].astype(np.float32)
                 mask = data["mask"].astype(bool)
@@ -201,42 +239,48 @@ class MCMEDDataset(Dataset):
             }
 
         if self.use_waveforms:
-            for waveform, length in [("II", 5000), ("Pleth", 1250), ("Resp", 625)]:
-                key = f"waveforms_{waveform}"
-                sample[key] = {
-                    "windows": np.empty((0, length, 1), dtype=np.float32),
-                    "start_seconds": np.empty((0,), dtype=np.float32),
-                    "segment_ids": np.empty((0,), dtype=np.int64),
-                    "sampling_rate": np.empty((0,), dtype=np.float32),
-                }
+            waveform_num_bins = int(self.waveforms_fixedbins_schema["num_bins"]) if self.waveforms_fixedbins_schema is not None else 32
+            sample["waveforms_II"] = {
+                "windows": np.zeros((waveform_num_bins, 5000, 1), dtype=np.float32),
+                "bin_mask": np.zeros((waveform_num_bins,), dtype=bool),
+                "sampling_rate": np.empty((0,), dtype=np.float32),
+                "bin_centers_seconds": np.zeros((waveform_num_bins,), dtype=np.float32),
+                "bin_edges_seconds": np.zeros((waveform_num_bins + 1,), dtype=np.float32),
+                "windows_per_bin": np.zeros((waveform_num_bins,), dtype=np.int32),
+            }
 
-                path_col = f"{key}_path"
-                exists_col = f"{key}_exists"
-                if path_col in row.index and pd.notna(row.get(path_col)) and bool(row.get(exists_col, 0)):
-                    with np.load(self.root_dir / row[path_col], allow_pickle=False) as data:
-                        windows = data["windows"].astype(np.float32)
-                        sampling_rate = data["sampling_rate"].astype(np.float32)
-                        start_seconds = data["start_seconds"].astype(np.float32)
-                        segment_ids = data["segment_ids"].astype(np.int64)
+            path_col = "waveforms_II_path"
+            exists_col = "waveforms_II_exists"
+            if path_col in row.index and pd.notna(row.get(path_col)) and bool(row.get(exists_col, 0)):
+                with np.load(self.root_dir / row[path_col], allow_pickle=False) as data:
+                    windows = data["windows"].astype(np.float32)
+                    sampling_rate = data["sampling_rate"].astype(np.float32)
+                    if self.max_waveform_windows > 0 and not self.use_waveform_fixedbins and windows.shape[0] > self.max_waveform_windows:
+                        windows = windows[: self.max_waveform_windows]
 
-                        if self.max_waveform_windows > 0 and windows.shape[0] > self.max_waveform_windows:
-                            windows = windows[: self.max_waveform_windows]
-                            start_seconds = start_seconds[: self.max_waveform_windows]
-                            segment_ids = segment_ids[: self.max_waveform_windows]
+                    if not np.isnan(windows).all():
+                        fs = float(sampling_rate[0]) if sampling_rate.size else 0.0
+                        for window_idx in range(windows.shape[0]):
+                            for channel_idx in range(windows.shape[2]):
+                                signal = windows[window_idx, :, channel_idx]
+                                if np.isnan(signal).all():
+                                    continue
+                                windows[window_idx, :, channel_idx] = highpass_filter_ecg(signal, fs)
 
-                        if waveform == "II" and not np.isnan(windows).all():
-                            fs = float(sampling_rate[0]) if sampling_rate.size else 0.0
-                            for window_idx in range(windows.shape[0]):
-                                for channel_idx in range(windows.shape[2]):
-                                    signal = windows[window_idx, :, channel_idx]
-                                    if np.isnan(signal).all():
-                                        continue
-                                    windows[window_idx, :, channel_idx] = highpass_filter_ecg(signal, fs)
-
-                        sample[key] = {
+                    if self.use_waveform_fixedbins:
+                        sample["waveforms_II"] = {
                             "windows": windows,
-                            "start_seconds": start_seconds,
-                            "segment_ids": segment_ids,
+                            "bin_mask": data["bin_mask"].astype(bool),
+                            "sampling_rate": sampling_rate,
+                            "bin_centers_seconds": data["bin_centers_seconds"].astype(np.float32),
+                            "bin_edges_seconds": data["bin_edges_seconds"].astype(np.float32),
+                            "windows_per_bin": data["windows_per_bin"].astype(np.int32),
+                        }
+                    else:
+                        sample["waveforms_II"] = {
+                            "windows": windows,
+                            "start_seconds": data["start_seconds"].astype(np.float32),
+                            "segment_ids": data["segment_ids"].astype(np.int64),
                             "sampling_rate": sampling_rate,
                         }
 
@@ -253,10 +297,6 @@ class MCMEDDataset(Dataset):
                 "rads_exists",
                 "waveforms_II_path",
                 "waveforms_II_exists",
-                "waveforms_Pleth_path",
-                "waveforms_Pleth_exists",
-                "waveforms_Resp_path",
-                "waveforms_Resp_exists",
             }
         ]
         # dict_keys(['MRN', 'Visit_no', 'Visits', 'Triage_acuity', 'ED_dispo', 'DC_dispo', 'Dx_ICD9', 'Dx_ICD10', 'Dx_name', 'Hours_to_next_visit', 'Dispo_class_next_visit', 'ED_LOS', 'Hosp_LOS', 'is_admitted', 'is_discharged', 'hospital_to_home', 'has_next_visit', 'revisit_within_72h', 'revisit_within_7d', 'next_visit_inpatient', 'triage_acuity_level', 'dx_icd10_prefix'])
@@ -276,7 +316,7 @@ def mcmed_collate_fn(
         "visits_static": {
             "numeric_values": torch.tensor(np.stack([sample["visits_static"]["numeric_values"] for sample in batch]), dtype=torch.float32),
             "numeric_mask": torch.tensor(np.stack([sample["visits_static"]["numeric_mask"] for sample in batch]), dtype=torch.bool),
-            "categorical_codes": torch.tensor(np.stack([sample["visits_static"]["categorical_codes"] for sample in batch]), dtype=torch.float32),
+            "categorical_codes": torch.tensor(np.stack([sample["visits_static"]["categorical_codes"] for sample in batch]), dtype=torch.long),
             "categorical_mask": torch.tensor(np.stack([sample["visits_static"]["categorical_mask"] for sample in batch]), dtype=torch.bool),
             "chief_complaint": [sample["visits_static"]["chief_complaint"] for sample in batch],
         },
@@ -289,43 +329,98 @@ def mcmed_collate_fn(
         "labels": {},
     }
 
-    max_t = max(sample["numerics"]["values"].shape[0] for sample in batch)
     bsz = len(batch)
-    collated["numerics"]["minute_offsets"] = torch.full((bsz, max_t), float("nan"), dtype=torch.float32)
-    collated["numerics"]["delta_minutes"] = torch.full((bsz, max_t), float("nan"), dtype=torch.float32)
-    collated["numerics"]["values"] = torch.full((bsz, max_t, 12), float("nan"), dtype=torch.float32)
-    collated["numerics"]["mask"] = torch.zeros((bsz, max_t, 12), dtype=torch.bool)
-    collated["numerics"]["source_codes"] = torch.full((bsz, max_t, 12), float("nan"), dtype=torch.float32)
-    collated["numerics"]["lengths"] = torch.tensor(
-        [sample["numerics"]["values"].shape[0] for sample in batch], dtype=torch.long
-    )
+    if "trend_values" in batch[0]["numerics"]:
+        collated["numerics"] = {
+            "trend_values": torch.tensor(
+                np.stack([sample["numerics"]["trend_values"] for sample in batch]),
+                dtype=torch.float32,
+            ),
+            "measure_mask": torch.tensor(
+                np.stack([sample["numerics"]["measure_mask"] for sample in batch]),
+                dtype=torch.bool,
+            ),
+            "bin_counts": torch.tensor(
+                np.stack([sample["numerics"]["bin_counts"] for sample in batch]),
+                dtype=torch.long,
+            ),
+            "bin_centers_minutes": torch.tensor(
+                np.stack([sample["numerics"]["bin_centers_minutes"] for sample in batch]),
+                dtype=torch.float32,
+            ),
+            "bin_edges_minutes": torch.tensor(
+                np.stack([sample["numerics"]["bin_edges_minutes"] for sample in batch]),
+                dtype=torch.float32,
+            ),
+        }
+    else:
+        max_t = max(sample["numerics"]["values"].shape[0] for sample in batch)
+        collated["numerics"]["minute_offsets"] = torch.full((bsz, max_t), float("nan"), dtype=torch.float32)
+        collated["numerics"]["delta_minutes"] = torch.full((bsz, max_t), float("nan"), dtype=torch.float32)
+        collated["numerics"]["values"] = torch.full((bsz, max_t, 12), float("nan"), dtype=torch.float32)
+        collated["numerics"]["mask"] = torch.zeros((bsz, max_t, 12), dtype=torch.bool)
+        collated["numerics"]["source_codes"] = torch.full((bsz, max_t, 12), float("nan"), dtype=torch.float32)
+        collated["numerics"]["lengths"] = torch.tensor(
+            [sample["numerics"]["values"].shape[0] for sample in batch], dtype=torch.long
+        )
 
-    for i, sample in enumerate(batch):
-        t = sample["numerics"]["values"].shape[0]
-        collated["numerics"]["minute_offsets"][i, :t] = torch.tensor(sample["numerics"]["minute_offsets"], dtype=torch.float32)
-        collated["numerics"]["delta_minutes"][i, :t] = torch.tensor(sample["numerics"]["delta_minutes"], dtype=torch.float32)
-        collated["numerics"]["values"][i, :t] = torch.tensor(sample["numerics"]["values"], dtype=torch.float32)
-        collated["numerics"]["mask"][i, :t] = torch.tensor(sample["numerics"]["mask"], dtype=torch.bool)
-        collated["numerics"]["source_codes"][i, :t] = torch.tensor(sample["numerics"]["source_codes"], dtype=torch.float32)
+        for i, sample in enumerate(batch):
+            t = sample["numerics"]["values"].shape[0]
+            collated["numerics"]["minute_offsets"][i, :t] = torch.tensor(sample["numerics"]["minute_offsets"], dtype=torch.float32)
+            collated["numerics"]["delta_minutes"][i, :t] = torch.tensor(sample["numerics"]["delta_minutes"], dtype=torch.float32)
+            collated["numerics"]["values"][i, :t] = torch.tensor(sample["numerics"]["values"], dtype=torch.float32)
+            collated["numerics"]["mask"][i, :t] = torch.tensor(sample["numerics"]["mask"], dtype=torch.bool)
+            collated["numerics"]["source_codes"][i, :t] = torch.tensor(sample["numerics"]["source_codes"], dtype=torch.float32)
 
     if "waveforms_II" in batch[0]:
-        for waveform, length in [("II", 5000), ("Pleth", 1250), ("Resp", 625)]:
-            key = f"waveforms_{waveform}"
-            max_n = max(sample[key]["windows"].shape[0] for sample in batch)
-            collated[key] = {
-                "windows": torch.full((bsz, max_n, length, 1), float("nan"), dtype=torch.float32),
+        if "bin_mask" in batch[0]["waveforms_II"]:
+            collated["waveforms_II"] = {
+                "windows": torch.tensor(
+                    np.stack([sample["waveforms_II"]["windows"] for sample in batch]),
+                    dtype=torch.float32,
+                ),
+                "bin_mask": torch.tensor(
+                    np.stack([sample["waveforms_II"]["bin_mask"] for sample in batch]),
+                    dtype=torch.bool,
+                ),
+                "sampling_rate": torch.tensor(
+                    np.stack([
+                        sample["waveforms_II"]["sampling_rate"]
+                        if sample["waveforms_II"]["sampling_rate"].shape[0] > 0
+                        else np.array([np.nan], dtype=np.float32)
+                        for sample in batch
+                    ]),
+                    dtype=torch.float32,
+                ),
+                "bin_centers_seconds": torch.tensor(
+                    np.stack([sample["waveforms_II"]["bin_centers_seconds"] for sample in batch]),
+                    dtype=torch.float32,
+                ),
+                "bin_edges_seconds": torch.tensor(
+                    np.stack([sample["waveforms_II"]["bin_edges_seconds"] for sample in batch]),
+                    dtype=torch.float32,
+                ),
+                "windows_per_bin": torch.tensor(
+                    np.stack([sample["waveforms_II"]["windows_per_bin"] for sample in batch]),
+                    dtype=torch.long,
+                ),
+            }
+        else:
+            max_n = max(sample["waveforms_II"]["windows"].shape[0] for sample in batch)
+            collated["waveforms_II"] = {
+                "windows": torch.full((bsz, max_n, 5000, 1), float("nan"), dtype=torch.float32),
                 "start_seconds": torch.full((bsz, max_n), float("nan"), dtype=torch.float32),
                 "segment_ids": torch.full((bsz, max_n), float("nan"), dtype=torch.float32),
                 "sampling_rate": torch.full((bsz, 1), float("nan"), dtype=torch.float32),
-                "lengths": torch.tensor([sample[key]["windows"].shape[0] for sample in batch], dtype=torch.long),
+                "lengths": torch.tensor([sample["waveforms_II"]["windows"].shape[0] for sample in batch], dtype=torch.long),
             }
             for i, sample in enumerate(batch):
-                n = sample[key]["windows"].shape[0]
-                collated[key]["windows"][i, :n] = torch.tensor(sample[key]["windows"], dtype=torch.float32)
-                collated[key]["start_seconds"][i, :n] = torch.tensor(sample[key]["start_seconds"], dtype=torch.float32)
-                collated[key]["segment_ids"][i, :n] = torch.tensor(sample[key]["segment_ids"], dtype=torch.float32)
-                if sample[key]["sampling_rate"].shape[0] > 0:
-                    collated[key]["sampling_rate"][i] = torch.tensor(sample[key]["sampling_rate"], dtype=torch.float32)
+                n = sample["waveforms_II"]["windows"].shape[0]
+                collated["waveforms_II"]["windows"][i, :n] = torch.tensor(sample["waveforms_II"]["windows"], dtype=torch.float32)
+                collated["waveforms_II"]["start_seconds"][i, :n] = torch.tensor(sample["waveforms_II"]["start_seconds"], dtype=torch.float32)
+                collated["waveforms_II"]["segment_ids"][i, :n] = torch.tensor(sample["waveforms_II"]["segment_ids"], dtype=torch.float32)
+                if sample["waveforms_II"]["sampling_rate"].shape[0] > 0:
+                    collated["waveforms_II"]["sampling_rate"][i] = torch.tensor(sample["waveforms_II"]["sampling_rate"], dtype=torch.float32)
 
     tokenizer = _get_bert_tokenizer(
         text_model_id=text_model_id,
