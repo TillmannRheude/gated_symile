@@ -190,7 +190,6 @@ class ModalityAttentionGate(nn.Module):
             G = F.normalize(G, dim=2, eps=self.eps)
 
         gated_list = [G[:, m, :] for m in range(self.M)]
-        self._maybe_save_pca_plot(target_idx=int(target_idx), embeddings=embeddings, gated_list=gated_list, w=w)
         return gated_list, w, W
 
 class Contrastive_Model(nn.Module):
