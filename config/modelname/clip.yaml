@@ -1,6 +1,6 @@
 modelname: clip
 
-emb_dim: 4096
+emb_dim: 256
 
 negative_sampling: None
 logit_scale_init: 2.65926

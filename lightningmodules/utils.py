@@ -112,6 +112,7 @@ class LightningModuleParent(pl.LightningModule):
         return_embeddings: bool = False,
     ) -> torch.tensor:
         logit_scale_exp = self.get_logit_scale_exp()
+        attention_candidate_dependent = bool(self.params_method.get("candidate_dependent", True))
         model_output = self.forward(batch)
         embeddings = model_output["embeddings"]
 
@@ -123,10 +124,11 @@ class LightningModuleParent(pl.LightningModule):
             # embeddings = [nn.functional.normalize(emb, dim=1) for emb in embeddings]
             embeddings = [nn.functional.normalize(emb, dim=-1) for emb in embeddings]
         
-        # DDP for global-batch contrastive objectives.
+        # DDP for global-batch attention scorer (candidate-dependent).
         if (
             set == "train"
             and self.modelname == "symile_attention"
+            and attention_candidate_dependent
             and self.params_method["negative_sampling"] == "pair"
             and dist.is_available()
             and dist.is_initialized()
@@ -143,6 +145,31 @@ class LightningModuleParent(pl.LightningModule):
             labels = torch.arange(rank * b_local, rank * b_local + b_local, device=self.device)
 
             loss = self._symile_attention_pair_loss(
+                embeddings=(r_a_local, r_b_local, r_c_local),
+                labels=labels,
+                candidates=(r_a_all, r_b_all, r_c_all),
+            )
+
+        # DDP for full candidate scalar-scoring attention objective
+        elif (
+            set == "train"
+            and self.modelname == "symile_attention"
+            and not attention_candidate_dependent
+            and dist.is_available()
+            and dist.is_initialized()
+            and dist.get_world_size() > 1
+        ):
+            r_a_local, r_b_local, r_c_local = embeddings
+
+            r_a_all = self._all_gather_with_grad(r_a_local)
+            r_b_all = self._all_gather_with_grad(r_b_local)
+            r_c_all = self._all_gather_with_grad(r_c_local)
+
+            b_local = r_a_local.shape[0]
+            rank = dist.get_rank()
+            labels = torch.arange(rank * b_local, rank * b_local + b_local, device=self.device)
+
+            loss = self._symile_attention_full_loss(
                 embeddings=(r_a_local, r_b_local, r_c_local),
                 labels=labels,
                 candidates=(r_a_all, r_b_all, r_c_all),
@@ -186,9 +213,10 @@ class LightningModuleParent(pl.LightningModule):
             rank = dist.get_rank()
             labels = torch.arange(rank * b_local, rank * b_local + b_local, device=self.device)
 
+            base_loss = symile_gated if self.use_gate else symile
             if self.use_gate:
                 if self.params_method["negative_sampling"] == "pair":
-                    loss = self.loss(
+                    loss = base_loss(
                         r_a_local, r_b_local, r_c_local,
                         logit_scale=logit_scale_exp,
                         negative_sampling=self.params_method["negative_sampling"],
@@ -199,7 +227,7 @@ class LightningModuleParent(pl.LightningModule):
                         pair_num_negatives=self.params_method["pair_num_negatives"],
                     )
                 else:
-                    loss = self.loss(
+                    loss = base_loss(
                         r_a_local, r_b_local, r_c_local,
                         logit_scale=logit_scale_exp,
                         negative_sampling=self.params_method["negative_sampling"], 
@@ -210,7 +238,7 @@ class LightningModuleParent(pl.LightningModule):
                     )
             else:
                 if self.params_method["negative_sampling"] == "pair":
-                    loss = self.loss(
+                    loss = base_loss(
                         r_a_local, r_b_local, r_c_local,
                         logit_scale=logit_scale_exp,
                         negative_sampling=self.params_method["negative_sampling"],
@@ -220,7 +248,7 @@ class LightningModuleParent(pl.LightningModule):
                         pair_num_negatives=self.params_method["pair_num_negatives"],
                     )
                 else:
-                    loss = self.loss(
+                    loss = base_loss(
                         r_a_local, r_b_local, r_c_local,
                         logit_scale=logit_scale_exp,
                         negative_sampling=self.params_method["negative_sampling"],
@@ -248,8 +276,10 @@ class LightningModuleParent(pl.LightningModule):
                         bias=self.bias,
                     )
             else:
-                if self.modelname == "symile_attention":
+                if self.modelname == "symile_attention" and attention_candidate_dependent:
                     loss = self._symile_attention_pair_loss(embeddings)
+                elif self.modelname == "symile_attention" and not attention_candidate_dependent:
+                    loss = self._symile_attention_full_loss(embeddings)
                 elif self.modelname == "comm":
                     loss = self.loss(
                         *embeddings,
@@ -475,6 +505,97 @@ class LightningModuleParent(pl.LightningModule):
             raise ValueError("No valid candidate pools for symile_attention pair logits.")
 
         return zs
+
+    def _symile_attention_full_loss(self, embeddings, labels=None, candidates=None):
+        """
+        Full candidate scalar-scoring loss for TransformerSymile.
+
+        For each target modality t, score every local query against the full
+        candidate pool of modality t and apply cross-entropy to the resulting
+        logits. This keeps the transformer as a triple->scalar scorer while
+        avoiding pair-sampled candidate-conditioning in training.
+        """
+        r_a, r_b, r_c = embeddings
+        emb_local = [self._ensure_seq(r_a), self._ensure_seq(r_b), self._ensure_seq(r_c)]
+
+        if candidates is None:
+            cand_pools = emb_local
+        else:
+            cand_pools = [self._ensure_seq(c) for c in candidates]
+
+        B = r_a.shape[0]
+        if labels is None:
+            labels = torch.arange(B, device=r_a.device)
+
+        query_chunk_size = int(self.params_method.get("attention_full_query_chunk_size", max(1, B // 2)))
+        candidate_chunk_size = int(self.params_method.get("attention_full_candidate_chunk_size", 256))
+
+        losses = []
+        for t in range(3):
+            c_t = cand_pools[t]
+            N = c_t.shape[0]
+            if N < 2:
+                continue
+
+            pos = labels.to(device=r_a.device, dtype=torch.long)
+            if pos.min().item() < 0 or pos.max().item() >= N:
+                raise ValueError(
+                    f"Labels out of range for target {t}: got [{int(pos.min())},{int(pos.max())}] but N={N}"
+                )
+
+            loss_sum = r_a.new_tensor(0.0)
+            count = 0
+
+            for qs in range(0, B, query_chunk_size):
+                qe = min(B, qs + query_chunk_size)
+                Bq = qe - qs
+                pos_q = pos[qs:qe]
+                logits_chunks = []
+
+                for cs in range(0, N, candidate_chunk_size):
+                    ce = min(N, cs + candidate_chunk_size)
+                    Nc = ce - cs
+
+                    triplets = []
+                    for m in range(3):
+                        x_all = cand_pools[m] if m == t else emb_local[m]
+                        Tm = x_all.shape[1]
+                        Dm = x_all.shape[2]
+
+                        if m == t:
+                            x = x_all[cs:ce]  # (Nc, Tm, D)
+                            x = x.unsqueeze(0).expand(Bq, Nc, Tm, Dm).reshape(Bq * Nc, Tm, Dm)
+                        else:
+                            x0 = x_all[qs:qe]  # (Bq, Tm, D)
+                            x = x0[:, None, :, :].expand(Bq, Nc, Tm, Dm).reshape(Bq * Nc, Tm, Dm)
+                        triplets.append(x)
+
+                    z = self.model.transformer(triplets)
+                    if z.dim() == 2 and z.shape[1] == 1:
+                        z = z.squeeze(1)
+                    elif z.dim() != 1:
+                        raise ValueError(
+                            f"TransformerSymile expected shape (Bq*Nc,) or (Bq*Nc,1); got {tuple(z.shape)}"
+                        )
+                    logits_chunks.append(z.view(Bq, Nc))
+
+                logits = torch.cat(logits_chunks, dim=1)
+                scale = self.get_logit_scale_exp()
+                if scale is not None:
+                    logits = scale * logits
+                if self.bias is not None:
+                    logits = logits + self.bias
+
+                loss_chunk = F.cross_entropy(logits, pos_q, reduction="sum")
+                loss_sum = loss_sum + loss_chunk
+                count += Bq
+
+            losses.append(loss_sum / float(count))
+
+        if len(losses) == 0:
+            raise ValueError("No valid candidate pools for symile_attention full loss.")
+
+        return sum(losses) / len(losses)
 
 
     def _log_gate_weights(self, gate_weights: torch.Tensor, set: str):

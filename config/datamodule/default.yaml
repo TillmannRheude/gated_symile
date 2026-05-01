@@ -8,7 +8,7 @@ valid_split: 'valid'
 test_split: 'test'
 combine_eids_as: 'intersect'  # 'intersect' / 'union' 
 num_workers: 4  # 32
-batch_size: 512  # 3072  # 512
+batch_size: 128  # 3072  # 512
 pin_memory: true
 drop_last: true
 shuffle: true

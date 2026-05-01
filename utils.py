@@ -4,6 +4,58 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+class NearIsometricLinear(nn.Module):
+    """
+    Linear layer with an orthogonal / semi-orthogonal weight matrix and a
+    learnable scalar gain initialized near 1.
+
+    This is a lightweight way to preserve geometry better than a free Linear
+    layer. For square layers it is orthogonal; for rectangular layers it is
+    semi-orthogonal in the sense supported by PyTorch's orthogonal
+    parametrization.
+    """
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        bias: bool = True,
+        gain_init: float = 1.0,
+        learnable_gain: bool = True,
+    ):
+        super().__init__()
+        self.in_features = int(in_features)
+        self.out_features = int(out_features)
+
+        self.linear = nn.Linear(self.in_features, self.out_features, bias=bias)
+        nn.utils.parametrizations.orthogonal(self.linear, "weight")
+
+        with torch.no_grad():
+            if self.linear.bias is not None:
+                self.linear.bias.zero_()
+
+        if learnable_gain:
+            self.log_gain = nn.Parameter(torch.tensor(float(gain_init)).log())
+        else:
+            self.log_gain = None
+            self.register_buffer("_gain_const", torch.tensor(float(gain_init)))
+
+    def extra_repr(self) -> str:
+        return (
+            f"in_features={self.in_features}, out_features={self.out_features}, "
+            f"bias={self.linear.bias is not None}, "
+            f"learnable_gain={self.log_gain is not None}"
+        )
+
+    def _gain(self) -> torch.Tensor:
+        if self.log_gain is not None:
+            return self.log_gain.exp()
+        return self._gain_const
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        weight = self._gain() * self.linear.weight
+        return F.linear(x, weight, self.linear.bias)
+
+
 class ProductPreservingActivation(nn.Module):
     """
     A near-identity activation designed to perturb coordinates gently instead of
@@ -126,8 +178,29 @@ class SigmoidSelfAttention(nn.Module):
         out = torch.matmul(gates, v)  # [B, H, T, Hd]
         out = out.transpose(1, 2).contiguous().view(B, T, D)
         out = self.out_proj(out)
-        out = x + self.alpha * out
+        out = self.alpha * out
         return out
+
+class SigmoidTransformerEncoderLayer_backup(nn.Module):
+    def __init__(self, d_model, nhead, dim_feedforward, dropout=0.0):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+
+        self.self_attn = SigmoidSelfAttention(d_model, nhead, dropout)
+        self.ff = nn.Sequential(
+            nn.Linear(d_model, dim_feedforward),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(dim_feedforward, d_model),
+        )
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, src, src_mask=None, src_key_padding_mask=None, is_causal=False):
+        x = src
+        x = x + self.dropout(self.self_attn(self.norm1(x)))
+        x = x + self.dropout(self.ff(self.norm2(x)))
+        return x
 
 class SigmoidTransformerEncoderLayer(nn.Module):
     def __init__(self, d_model, nhead, dim_feedforward, dropout=0.0):
@@ -149,7 +222,6 @@ class SigmoidTransformerEncoderLayer(nn.Module):
         x = x + self.dropout(self.self_attn(self.norm1(x)))
         x = x + self.dropout(self.ff(self.norm2(x)))
         return x
-
 
 class PatchEncoder_CXR(nn.Module):
     def __init__(self, image_size=320, patch_size=64, in_channels=3, emb_dim=256, num_tokens=None):

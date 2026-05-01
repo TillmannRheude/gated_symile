@@ -226,6 +226,7 @@ class TransformerSymile(nn.Module):
         seq_dims: list[int] = [1, 1, 1],
         num_register_tokens: int = 0,
         use_mask_tokens: bool = False,
+        candidate_dependent: bool = True,
     ):
         super().__init__()
         d_model = transformer_params["d_model"]
@@ -233,6 +234,7 @@ class TransformerSymile(nn.Module):
         self.seq_dims = list(seq_dims)
         self.num_register_tokens = int(num_register_tokens)
         self.use_mask_tokens = bool(use_mask_tokens)
+        self.candidate_dependent = bool(candidate_dependent)
 
         #self.mod_projs = nn.ModuleList([
         #    nn.Linear(d_model, d_model) for _ in range(self.max_modalities)
@@ -323,6 +325,7 @@ class TransformerSymile(nn.Module):
         self,
         embeddings: list[torch.Tensor],
         source_mask: torch.Tensor = None,
+        return_features: bool = False,
     ):
         embeddings = [
             embedding[:, None, :] if embedding.ndim == 2 else embedding for embedding in embeddings
@@ -358,7 +361,23 @@ class TransformerSymile(nn.Module):
         tokens = torch.cat(modality_tokens, dim=1)  # [B, sum(seq_dims), D]
         """
 
-        tokens = torch.cat(embeddings, dim=1)  # [B, M, D]
+        modality_tokens = []
+        token_slices = []
+        start = 0
+        for m, embedding in enumerate(embeddings):
+            tok = embedding
+            if source_mask is not None:
+                missing = source_mask[:, m]
+                if missing.any():
+                    mask_tok = self.mask_tokens[m].expand(tok.shape[0], tok.shape[1], -1)
+                    missing_view = missing[:, None, None]
+                    tok = torch.where(missing_view, mask_tok, tok)
+            modality_tokens.append(tok)
+            end = start + tok.shape[1]
+            token_slices.append((start, end))
+            start = end
+
+        tokens = torch.cat(modality_tokens, dim=1)  # [B, sum(T_m), D]
 
         # add registers 
         if self.num_register_tokens > 0:
@@ -375,9 +394,14 @@ class TransformerSymile(nn.Module):
         if self.num_register_tokens > 0:
             transformer_output = transformer_output[:, :-self.num_register_tokens, :]
 
-        z = torch.flatten(transformer_output, start_dim=1)  # [B, M*D]
-        z = self.proj_head(z)
-        #z = self.linear(transformer_output[:, 0, :])
+        flat_features = torch.flatten(transformer_output, start_dim=1)  # [B, M*D]
+        z = self.proj_head(flat_features)
+        if return_features:
+            return {
+                "z": z,
+                "transformer_flat": flat_features,
+                "transformer_tokens": transformer_output,
+            }
         return z
 
 class TransformerSymile_Model(nn.Module):
@@ -391,12 +415,15 @@ class TransformerSymile_Model(nn.Module):
         },
         proj_output_dim: int = 1,
         seq_dims: list[int] = [1, 1, 1],
+        candidate_dependent: bool = True,
     ):
         super().__init__()
+        self.candidate_dependent = bool(candidate_dependent)
         self.transformer = TransformerSymile(
             transformer_params=transformer_params,
             proj_output_dim=proj_output_dim,
             seq_dims=seq_dims,
+            candidate_dependent=candidate_dependent,
         )
         self.contrastive_model = contrastive_model
 
@@ -406,10 +433,12 @@ class TransformerSymile_Model(nn.Module):
         source_mask: torch.Tensor = None,
     ):
         embeddings = self.contrastive_model(x)["embeddings"]
-        z = self.transformer(embeddings, source_mask=source_mask)
+        transformer_output = self.transformer(embeddings, source_mask=source_mask, return_features=True)
         return {
             "embeddings": embeddings,
-            "z": z,
+            "z": transformer_output["z"],
+            "transformer_flat": transformer_output["transformer_flat"],
+            "transformer_tokens": transformer_output["transformer_tokens"],
         }
 
 
