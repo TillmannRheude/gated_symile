@@ -553,9 +553,9 @@ class UKBTabularEncoder(nn.Module):
         if self.combine_eids_as == "union":
             # also pass binary missing mask as input to the MLP
             input_dim = input_dim * 2
-        #self.residual_proj = nn.Linear(input_dim, emb_dim, bias=True)
-        #self.residual_drop = nn.Dropout(float(hidden_dropouts[0] / 2))
-        #self.residual_norm = nn.LayerNorm(emb_dim)
+        self.residual_proj = nn.Linear(input_dim, emb_dim, bias=True)
+        self.residual_drop = nn.Dropout(0.0)  # float(hidden_dropouts[0] / 2)
+        self.residual_norm = nn.LayerNorm(emb_dim)
 
         layers = []
         prev = input_dim
@@ -569,8 +569,8 @@ class UKBTabularEncoder(nn.Module):
         self.mlp = nn.Sequential(*layers)
 
         self.apply(self._init_weights)
-        self.init_near_identity_(noise_scale=1e-3)
-        #self.init_residual_identity_()
+        #self.init_near_identity_(noise_scale=1e-2)
+        self.init_residual_identity_()
 
         if shared_adapter is not None:
             self.mlp = nn.Sequential(
@@ -649,8 +649,8 @@ class UKBTabularEncoder(nn.Module):
             # raise ValueError("NaN values present in input")
             x = torch.nan_to_num(x, nan=0.0)
         
-        #residual = self.residual_drop(self.residual_norm(self.residual_proj(x)))
-        return self.mlp(x)
+        residual = self.residual_drop(self.residual_norm(self.residual_proj(x)))
+        return residual + self.mlp(x)
 
 class UKBTabularEncoder_EF(nn.Module):
     def __init__(
@@ -737,8 +737,7 @@ class SyntheticXNOREncoder(nn.Module):
             nn.ReLU(),
             nn.Linear(emb_dim, emb_dim)
         )
-        # self.apply(self._init_weights)
-
+        self.apply(self._init_weights)
         self.init_near_identity_(noise_scale=1e-3)
         # self.init_residual_identity_()
     

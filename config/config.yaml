@@ -2,7 +2,7 @@ defaults:
   - _self_
   - datamodule: default
   - encoders: synthetic_xnor  # symile_mimic / ukb / synthetic_xnor / mcmed
-  - modelname: symile  # clip / symile / triangle / gram / comm / symile_attention
+  - modelname: clip  # clip / symile / triangle / gram / comm / symile_attention
 
 dataset_name: synthetic_xnor  # symile_mimic / ukb / synthetic_xnor / mcmed
 batch_size: 128
@@ -30,4 +30,4 @@ wandb:
   group: None
 
 ckpt_dir: "checkpoints"
-ckpt_name: None
+ckpt_name: None  # transformer_symile_ukb

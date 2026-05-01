@@ -37,7 +37,7 @@ def main(cfg) -> None:
     model = build_model(cfg)
     datamodule = build_datamodule(cfg)
 
-    if cfg.ckpt_name != "None":
+    if cfg.ckpt_name != "None" and cfg.ckpt_name is not None:
         ckpt_path = cfg.ckpt_dir
         ckpt_name = cfg.ckpt_name
         if os.path.exists(f'{ckpt_path}/{ckpt_name}.ckpt'):

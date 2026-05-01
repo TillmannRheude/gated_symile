@@ -42,6 +42,7 @@ def build_model(cfg: dict):
     params_method = {
         "modelname": cfg["modelname"]["modelname"],
         "negative_sampling": cfg["modelname"]["negative_sampling"],
+        "candidate_dependent": cfg["modelname"].get("candidate_dependent", True),
         "logit_scale_init": cfg["modelname"]["logit_scale_init"],
         "batch_size": cfg["batch_size"],
         "embedding_norm": cfg["modelname"]["embedding_norm"],
@@ -78,7 +79,8 @@ def build_model(cfg: dict):
                 contrastive_model=model,
                 transformer_params=cfg["modelname"]["transformer_params"],
                 proj_output_dim=1,
-                seq_dims=[1,1,1]
+                seq_dims=[1,1,1],
+                candidate_dependent=cfg["modelname"].get("candidate_dependent", True),
             )
 
         return SymileMIMICModel(
@@ -156,7 +158,8 @@ def build_model(cfg: dict):
                 contrastive_model=model,
                 transformer_params=cfg["modelname"]["transformer_params"],
                 proj_output_dim=1,
-                seq_dims=[1,1,1]
+                seq_dims=[1,1,1],
+                candidate_dependent=cfg["modelname"].get("candidate_dependent", True),
             )
 
         return UKBModel(
@@ -192,7 +195,8 @@ def build_model(cfg: dict):
                 contrastive_model=model,
                 transformer_params=cfg["modelname"]["transformer_params"],
                 proj_output_dim=1,
-                seq_dims=[1,1,1]
+                seq_dims=[1,1,1],
+                candidate_dependent=cfg["modelname"].get("candidate_dependent", True),
             )
         if cfg["modelname"]["modelname"] == "comm":
             model = CoMM_Model(
