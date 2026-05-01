@@ -20,7 +20,7 @@ embed_mode: "u_v_uv"
 p_flips: [0.0, 0.0]
 
 # corruption probabilities
-p_corrs: [0.0, 0.4, 0.4]
+p_corrs: [0.0, 1.0, 1.0]
 
 # use misleading corruption (not gaussian) so ungated gets pulled the wrong way
 corr_modes: "swap_signal"
