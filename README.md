@@ -10,7 +10,7 @@ Multimodal contrastive learning is increasingly enriched by going beyond image-t
 ## Get Started
 #### Running a Method on Synthetic-XNOR
 To get started quickly, you can use the Synthetic-XNOR dataset as described in the following.
-Use the `config_synthetic` inside the `main.py`/`main.ipynb` file. Following this config file, adjust paths and parameters and then start training with the main file.
+Use the `config_synthetic` inside the `main.py`/`main.ipynb` file. Following this config file, adjust paths and parameters and then start training with the main file. For example, you can choose the model (clip or symile) via modelname in `config_synthetic`. The gate can be activated with the symile configuration file under `config/modelname/symile.yaml`. The swap value (p) and other parameters for the synthetic dataset can be adjusted under `config/encoders/synthetic_xnor.yaml`. 
 
 Note: Weights & Biases (WandB) logging is enabled by default and can be managed via the `wandb` section in the config file. If you prefer to disable WandB, you can comment out the related lines in `main.py` or `main.ipynb`.
 

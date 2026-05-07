@@ -1,11 +1,10 @@
 defaults:
   - _self_
-  - datamodule: default
-  - encoders: symile_mimic  # symile_mimic / ukb
+  - encoders: synthetic_xnor  # symile_mimic / ukb
   - modelname: symile  # clip / symile
 
-dataset_name: symile_mimic  # symile_mimic / ukb
-batch_size: 256
+dataset_name: synthetic_xnor  # symile_mimic / ukb
+batch_size: 128
 split_nr: 1
 devices: 1
 

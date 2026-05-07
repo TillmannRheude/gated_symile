@@ -1,12 +1,12 @@
 modelname: clip
 
-emb_dim: 4096
+emb_dim: 256
 
 negative_sampling: None
 logit_scale_init: 2.65926
 embedding_norm: True
 
-pair_num_negatives: 512  # number of negatives for pair sampling, not used for clip
+pair_num_negatives: 128  # number of negatives for pair sampling, not used for clip
 
 use_gate: False
 use_null: True

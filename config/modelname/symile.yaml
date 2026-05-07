@@ -2,19 +2,19 @@ modelname: symile
 
 emb_dim: 256
 
-negative_sampling: n  # n_squared, pair
-logit_scale_init: 0  # -2.65926
+negative_sampling: pair  # n_squared, pair
+logit_scale_init: -0.5524690048376106  # -2.65926
 embedding_norm: True
 
-pair_num_negatives: 512  # number of negatives for pair sampling, 
+pair_num_negatives: 128  # number of negatives for pair sampling, 
 
-use_gate: False
+use_gate: True
 use_null: True
 renormalize: True
-gate_temp: 0.7
-gate_bias_init: 0.0
+gate_temp: 0.5
+gate_bias_init: 0.0  # outdated
 gate_type: "sigmoid"
 gate_mode: "attention"  # matrix, attention
 neutral_type: "random_trainable"  # ones, random_frozen, random_trainable
-gate_strength_init: -3.0
+gate_strength_init: 0
 gate_d_k: 256
