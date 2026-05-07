@@ -542,20 +542,23 @@ class UKBTabularEncoder(nn.Module):
         combine_eids_as: str = "intersect",
         shared_adapter: nn.Module = None,
         modality_name: str = None,
+        geometry_preserving: bool = False,
     ):
         super().__init__()
 
         self.input_dim = int(input_dim)
         self.emb_dim = emb_dim
         self.modality_name = modality_name
+        self.geometry_preserving = geometry_preserving
 
         self.combine_eids_as = combine_eids_as
         if self.combine_eids_as == "union":
             # also pass binary missing mask as input to the MLP
             input_dim = input_dim * 2
-        self.residual_proj = nn.Linear(input_dim, emb_dim, bias=True)
-        self.residual_drop = nn.Dropout(0.0)  # float(hidden_dropouts[0] / 2)
-        self.residual_norm = nn.LayerNorm(emb_dim)
+        if geometry_preserving:
+            self.residual_proj = nn.Linear(input_dim, emb_dim, bias=True)
+            self.residual_drop = nn.Dropout(0.0)  # float(hidden_dropouts[0] / 2)
+            self.residual_norm = nn.LayerNorm(emb_dim)
 
         layers = []
         prev = input_dim
@@ -569,8 +572,9 @@ class UKBTabularEncoder(nn.Module):
         self.mlp = nn.Sequential(*layers)
 
         self.apply(self._init_weights)
-        #self.init_near_identity_(noise_scale=1e-2)
-        self.init_residual_identity_()
+        if geometry_preserving:
+            # self.init_near_identity_(noise_scale=1e-2)
+            self.init_residual_identity_()
 
         if shared_adapter is not None:
             self.mlp = nn.Sequential(
@@ -649,8 +653,10 @@ class UKBTabularEncoder(nn.Module):
             # raise ValueError("NaN values present in input")
             x = torch.nan_to_num(x, nan=0.0)
         
-        residual = self.residual_drop(self.residual_norm(self.residual_proj(x)))
-        return residual + self.mlp(x)
+        if self.geometry_preserving:
+            residual = self.residual_drop(self.residual_norm(self.residual_proj(x)))
+            return residual + self.mlp(x)
+        return self.mlp(x)
 
 class UKBTabularEncoder_EF(nn.Module):
     def __init__(
@@ -723,12 +729,15 @@ class SyntheticXNOREncoder(nn.Module):
         self,
         input_dim: int = 128,
         emb_dim: int = 8192,
+        geometry_preserving: bool = False,
     ):
         super().__init__()
         self.input_dim = int(input_dim)
         self.emb_dim = emb_dim
+        self.geometry_preserving = geometry_preserving
 
-        self.residual_proj = nn.Linear(input_dim, emb_dim)
+        if geometry_preserving:
+            self.residual_proj = nn.Linear(input_dim, emb_dim)
 
         self.mlp = nn.Sequential(
             nn.Linear(input_dim, emb_dim),
@@ -738,8 +747,9 @@ class SyntheticXNOREncoder(nn.Module):
             nn.Linear(emb_dim, emb_dim)
         )
         self.apply(self._init_weights)
-        self.init_near_identity_(noise_scale=1e-3)
-        # self.init_residual_identity_()
+        if geometry_preserving:
+            self.init_near_identity_(noise_scale=1e-3)
+            self.init_residual_identity_()
     
     def _init_weights(
         self,
@@ -870,7 +880,10 @@ class SyntheticXNOREncoder(nn.Module):
             )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.mlp(x)  # self.residual_proj(x) + 
+        if self.geometry_preserving:
+            residual = self.residual_proj(x)
+            return residual + self.mlp(x)
+        return self.mlp(x)
 
 
 class SyntheticXNOREncoder_Res(nn.Module):

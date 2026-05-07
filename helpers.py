@@ -149,6 +149,7 @@ def build_model(cfg: dict):
                     emb_dim=cfg["modelname"]["emb_dim"],
                     combine_eids_as=cfg["datamodule"]["combine_eids_as"],
                     modality_name=mod,
+                    geometry_preserving=cfg["encoders"]["geometry_preserving"],
                 )
             )
         model = Contrastive_Model(encoders=encoders)
@@ -177,15 +178,18 @@ def build_model(cfg: dict):
         encoders = nn.ModuleList([
             SyntheticXNOREncoder(
                 input_dim=cfg["encoders"]["input_dim"], 
-                emb_dim=cfg["modelname"]["emb_dim"]
+                emb_dim=cfg["modelname"]["emb_dim"],
+                geometry_preserving=cfg["encoders"]["geometry_preserving"],
             ),
             SyntheticXNOREncoder(
                 input_dim=cfg["encoders"]["input_dim"], 
-                emb_dim=cfg["modelname"]["emb_dim"]
+                emb_dim=cfg["modelname"]["emb_dim"],
+                geometry_preserving=cfg["encoders"]["geometry_preserving"],
             ),
             SyntheticXNOREncoder(
                 input_dim=cfg["encoders"]["input_dim"], 
-                emb_dim=cfg["modelname"]["emb_dim"]
+                emb_dim=cfg["modelname"]["emb_dim"],
+                geometry_preserving=cfg["encoders"]["geometry_preserving"],
             ),
         ])
         model = Contrastive_Model(encoders=encoders)

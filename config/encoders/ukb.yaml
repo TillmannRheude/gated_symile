@@ -5,6 +5,7 @@ monitor:
   metric: "val/acc_top1"
   mode: "max"
 
+geometry_preserving: False
 
 # modalities to use for learning 
 modalities: ["nmr", "ehr", "olink"]

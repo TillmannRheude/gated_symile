@@ -1,0 +1,39 @@
+{
+  "checkpoint": "/sc-projects/sc-proj-ukb-cvd/projects/rhti10/gated_symile/checkpoints/clip_ukb.ckpt",
+  "selection_metric": "roc_auc",
+  "label_plugin": "labels",
+  "label_column": "10y_mortality",
+  "representations": [
+    "concat"
+  ],
+  "n_train": 31567,
+  "n_valid": 3430,
+  "n_test": 4512,
+  "results_by_representation": {
+    "concat": {
+      "best_params": {
+        "C": 0.0001,
+        "class_weight": "none"
+      },
+      "valid_metrics": {
+        "accuracy": 0.9233236151603499,
+        "balanced_accuracy": 0.5,
+        "f1": 0.0,
+        "precision": 0.0,
+        "recall": 0.0,
+        "average_precision": 0.07667638483965014,
+        "roc_auc": 0.5
+      },
+      "test_metrics": {
+        "accuracy": 0.9330673758865248,
+        "balanced_accuracy": 0.5,
+        "f1": 0.0,
+        "precision": 0.0,
+        "recall": 0.0,
+        "average_precision": 0.06693262411347518,
+        "roc_auc": 0.5
+      },
+      "embedding_dim": 18432
+    }
+  }
+}
