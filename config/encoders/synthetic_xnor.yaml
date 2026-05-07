@@ -5,6 +5,8 @@ monitor:
   metric: "val/acc_top1"
   mode: "max"
 
+geometry_preserving: False
+
 input_dim: 128
 n_samples: 30000
 
