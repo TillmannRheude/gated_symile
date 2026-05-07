@@ -8,7 +8,7 @@ embedding_norm: True
 
 pair_num_negatives: 128  # number of negatives for pair sampling, 
 
-use_gate: True
+use_gate: False
 use_null: True
 renormalize: True
 gate_temp: 0.5

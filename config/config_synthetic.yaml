@@ -13,7 +13,7 @@ optimizer:
   lr: 0.008751964799911622
   lr_gate_mul: 2
   warmup_steps: 200
-  weight_decay: 0.01  # 1e-4
+  weight_decay: 0.0  # 1e-4
   eps: 1e-7
   betas: [0.9, 0.95]
 
