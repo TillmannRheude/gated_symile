@@ -1,5 +1,6 @@
 import torch
 import torch.distributed as dist
+import torch.nn.functional as F
 from typing import Optional
 
 from architecture import ModalityAttentionGate
@@ -48,6 +49,8 @@ class SyntheticXNORModel(LightningModuleParent):
         else:
             self.gate = None
 
+        self._analysis_batch = None
+
         self.save_hyperparameters()
 
     def forward(self, x):
@@ -68,6 +71,13 @@ class SyntheticXNORModel(LightningModuleParent):
         r_a, r_b, r_c = embeddings
         if r_a.numel() == 0:
             return []
+
+        if split == "val" and self._analysis_batch is None:
+            self._analysis_batch = {
+                "A": batch["A"].detach().cpu(),
+                "B": batch["B"].detach().cpu(),
+                "C": batch["C"].detach().cpu(),
+            }
 
         # If training uses pair sampling with gating, make validation candidate-dependent too:
         # for each query i and candidate j, compute gate weights from (A_j, B_i, C_i).
@@ -175,6 +185,99 @@ class SyntheticXNORModel(LightningModuleParent):
         y = torch.arange(r_a.shape[0], device=pred.device, dtype=pred.dtype)
         return (pred == y).float().tolist()
 
+    def _center(self, x: torch.Tensor) -> torch.Tensor:
+        return x - x.mean(dim=0, keepdim=True)
+
+    def _linear_cka(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        x = self._center(x.float())
+        y = self._center(y.float())
+        hsic_xy = torch.linalg.norm(x.T @ y, ord="fro").pow(2)
+        hsic_xx = torch.linalg.norm(x.T @ x, ord="fro")
+        hsic_yy = torch.linalg.norm(y.T @ y, ord="fro")
+        denom = hsic_xx * hsic_yy + 1e-8
+        return hsic_xy / denom
+
+    def _subspace_cosine(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        x = self._center(x.float())
+        y = self._center(y.float())
+        qx, _ = torch.linalg.qr(x, mode="reduced")
+        qy, _ = torch.linalg.qr(y, mode="reduced")
+        s = torch.linalg.svdvals(qx.T @ qy)
+        return s.mean()
+
+    def _procrustes_error(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        x = self._center(x.float())
+        y = self._center(y.float())
+        x = x / (torch.linalg.norm(x) + 1e-8)
+        y = y / (torch.linalg.norm(y) + 1e-8)
+        m = x.T @ y
+        u, _, vh = torch.linalg.svd(m, full_matrices=False)
+        r = u @ vh
+        return torch.linalg.norm(x @ r - y, ord="fro")
+
+    def _pairwise_distance_corr(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        x = x.float()
+        y = y.float()
+        dx = torch.pdist(x)
+        dy = torch.pdist(y)
+        dx = dx - dx.mean()
+        dy = dy - dy.mean()
+        denom = torch.linalg.norm(dx) * torch.linalg.norm(dy) + 1e-8
+        return torch.dot(dx, dy) / denom
+
+    def _encoder_jacobian_stats(self, encoder, x0: torch.Tensor) -> dict[str, torch.Tensor]:
+        x0 = x0.detach().clone().to(self.device).requires_grad_(True)
+
+        def f(inp):
+            return encoder(inp.unsqueeze(0)).squeeze(0)
+
+        jac = torch.autograd.functional.jacobian(f, x0, vectorize=True)
+        s = torch.linalg.svdvals(jac.float())
+        s_max = s.max()
+        s_min = s.min()
+        return {
+            "jac_smax": s_max,
+            "jac_smean": s.mean(),
+            "jac_smin": s_min,
+            "jac_cond": s_max / (s_min + 1e-8),
+            "jac_frob": torch.linalg.norm(jac.float(), ord="fro"),
+        }
+
+    def analyze_geometry(self, split: str = "val") -> None:
+        if self._analysis_batch is None or not self.trainer.is_global_zero:
+            return
+
+        batch = {k: v.to(self.device) for k, v in self._analysis_batch.items()}
+        with torch.no_grad():
+            model_output = self.forward(batch)
+            embeddings = model_output["embeddings"]
+
+        names = ["A", "B", "C"]
+        for i in range(len(embeddings)):
+            for j in range(i + 1, len(embeddings)):
+                xi = embeddings[i].detach()
+                xj = embeddings[j].detach()
+                ni, nj = names[i], names[j]
+                self.log(f"{split}/analysis_cka_{ni}_{nj}", self._linear_cka(xi, xj), on_step=False, on_epoch=True, sync_dist=False)
+                self.log(f"{split}/analysis_subspace_cos_{ni}_{nj}", self._subspace_cosine(xi, xj), on_step=False, on_epoch=True, sync_dist=False)
+                self.log(f"{split}/analysis_procrustes_{ni}_{nj}", self._procrustes_error(xi, xj), on_step=False, on_epoch=True, sync_dist=False)
+                self.log(f"{split}/analysis_distcorr_{ni}_{nj}", self._pairwise_distance_corr(xi, xj), on_step=False, on_epoch=True, sync_dist=False)
+
+        encoders = self.model.contrastive_model.encoders if hasattr(self.model, "contrastive_model") else self.model.encoders
+        for name, encoder, x0 in zip(names, encoders, [batch["A"][0], batch["B"][0], batch["C"][0]]):
+            stats = self._encoder_jacobian_stats(encoder, x0)
+            for key, value in stats.items():
+                self.log(f"{split}/analysis_{name}_{key}", value, on_step=False, on_epoch=True, sync_dist=False)
+
+    def on_validation_epoch_start(self):
+        self._analysis_batch = None
+        super().on_validation_epoch_start()
+
+    def on_validation_epoch_end(self):
+        if not getattr(self.trainer, "sanity_checking", False):
+            self.analyze_geometry(split="val")
+        super().on_validation_epoch_end()
+
     def _masked_mean(self, values: torch.Tensor, mask: torch.Tensor) -> Optional[torch.Tensor]:
         mask = mask.to(device=values.device, dtype=torch.bool)
         if mask.numel() == 0 or values.numel() == 0:
@@ -254,5 +357,3 @@ class SyntheticXNORModel(LightningModuleParent):
                 on_epoch=True,
                 sync_dist=False,
             )
-    
-    

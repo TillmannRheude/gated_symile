@@ -5,7 +5,15 @@ monitor:
   metric: "val/acc_top1"
   mode: "max"
 
-geometry_preserving: False
+geometry_preserving: "bounded_svd_linear"  # "residual"  # True
+bounded_svd_params:
+  sv_min: 0.5
+  sv_max: 1.2
+  learnable_singular_values: False
+
+activation_fn_params:
+  leaky_relu_negative_slope: 0.01
+
 
 input_dim: 128
 n_samples: 30000

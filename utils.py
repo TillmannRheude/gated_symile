@@ -4,6 +4,133 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+class AdditiveCouplingBlock(nn.Module):
+    """
+    Simple invertible additive coupling block for tabular vectors.
+
+    Split x = [x1, x2] and apply:
+        y1 = x1
+        y2 = x2 + alpha * t(x1)
+
+    Optionally swap halves before/after the transform to alternate which part
+    gets updated across stacked blocks. This is invertible by construction and
+    starts near the identity when alpha is small.
+    """
+    def __init__(
+        self,
+        dim: int,
+        hidden_dim: int = None,
+        dropout: float = 0.0,
+        alpha_init: float = 1e-2,
+        swap: bool = False,
+    ):
+        super().__init__()
+        if dim < 2:
+            raise ValueError("AdditiveCouplingBlock requires dim >= 2.")
+
+        self.dim = int(dim)
+        self.swap = bool(swap)
+        self.split1 = self.dim // 2
+        self.split2 = self.dim - self.split1
+        hidden_dim = self.dim if hidden_dim is None else int(hidden_dim)
+
+        self.net = nn.Sequential(
+            nn.LayerNorm(self.split1),
+            nn.Linear(self.split1, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, self.split2),
+        )
+        self.alpha = nn.Parameter(torch.tensor(float(alpha_init)))
+        self._init_near_zero_()
+
+    def _init_near_zero_(self) -> None:
+        with torch.no_grad():
+            for m in self.net.modules():
+                if isinstance(m, nn.Linear):
+                    nn.init.zeros_(m.weight)
+                    if m.bias is not None:
+                        nn.init.zeros_(m.bias)
+                elif isinstance(m, nn.LayerNorm):
+                    nn.init.ones_(m.weight)
+                    nn.init.zeros_(m.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.shape[-1] != self.dim:
+            raise ValueError(f"Expected last dim {self.dim}, got {x.shape[-1]}")
+
+        if self.swap:
+            x = torch.cat([x[..., self.split1:], x[..., :self.split1]], dim=-1)
+
+        x1 = x[..., :self.split1]
+        x2 = x[..., self.split1:]
+        delta = self.alpha * self.net(x1)
+        y = torch.cat([x1, x2 + delta], dim=-1)
+
+        if self.swap:
+            y = torch.cat([y[..., self.split2:], y[..., :self.split2]], dim=-1)
+        return y
+
+    def inverse(self, y: torch.Tensor) -> torch.Tensor:
+        if y.shape[-1] != self.dim:
+            raise ValueError(f"Expected last dim {self.dim}, got {y.shape[-1]}")
+
+        if self.swap:
+            y = torch.cat([y[..., self.split1:], y[..., :self.split1]], dim=-1)
+
+        y1 = y[..., :self.split1]
+        y2 = y[..., self.split1:]
+        delta = self.alpha * self.net(y1)
+        x = torch.cat([y1, y2 - delta], dim=-1)
+
+        if self.swap:
+            x = torch.cat([x[..., self.split2:], x[..., :self.split2]], dim=-1)
+        return x
+
+class InvertibleTabularAdapter(nn.Module):
+    """
+    Stack of additive coupling blocks for tabular encoders.
+
+    Intended use:
+      1. project input to emb_dim with a standard Linear
+      2. pass through this adapter
+      3. feed the result to the multimodal scorer
+
+    Because each block is invertible and initialized near identity, this gives
+    a more conditioning-friendly alternative to a free MLP.
+    """
+    def __init__(
+        self,
+        dim: int,
+        num_blocks: int = 2,
+        hidden_dim: int = None,
+        dropout: float = 0.0,
+        alpha_init: float = 1e-2,
+    ):
+        super().__init__()
+        self.dim = int(dim)
+        self.blocks = nn.ModuleList([
+            AdditiveCouplingBlock(
+                dim=self.dim,
+                hidden_dim=hidden_dim,
+                dropout=dropout,
+                alpha_init=alpha_init,
+                swap=bool(i % 2),
+            )
+            for i in range(int(num_blocks))
+        ])
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        for block in self.blocks:
+            x = block(x)
+        return x
+
+    def inverse(self, y: torch.Tensor) -> torch.Tensor:
+        for block in reversed(self.blocks):
+            y = block.inverse(y)
+        return y
+
+
 class NearIsometricLinear(nn.Module):
     """
     Linear layer with an orthogonal / semi-orthogonal weight matrix and a
@@ -54,6 +181,182 @@ class NearIsometricLinear(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         weight = self._gain() * self.linear.weight
         return F.linear(x, weight, self.linear.bias)
+
+
+class BoundedOrthogonalLinear(nn.Module):
+    """
+    Orthogonal / semi-orthogonal mixing layer with bounded per-dimension gains.
+
+    The effective map is:
+        y = W (diag(g) x) + b
+
+    where:
+      - W is orthogonal (or semi-orthogonal for rectangular shapes),
+      - each gain g_i is constrained to [gain_min, gain_max].
+
+    This is intended as a more explicitly bi-Lipschitz alternative to a free
+    Linear layer: it limits both expansion and collapse coordinate-wise before
+    the orthogonal mixing.
+    """
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        bias: bool = True,
+        gain_min: float = 0.5,
+        gain_max: float = 2.0,
+        gain_init: float = 1.0,
+    ):
+        super().__init__()
+        if gain_min <= 0.0:
+            raise ValueError("gain_min must be positive.")
+        if gain_max <= gain_min:
+            raise ValueError("gain_max must be larger than gain_min.")
+        if not (gain_min <= gain_init <= gain_max):
+            raise ValueError("gain_init must lie in [gain_min, gain_max].")
+
+        self.in_features = int(in_features)
+        self.out_features = int(out_features)
+        self.gain_min = float(gain_min)
+        self.gain_max = float(gain_max)
+
+        self.linear = nn.Linear(self.in_features, self.out_features, bias=bias)
+        nn.utils.parametrizations.orthogonal(self.linear, "weight")
+
+        with torch.no_grad():
+            if self.linear.bias is not None:
+                self.linear.bias.zero_()
+
+        # Reparameterize gains to stay in [gain_min, gain_max].
+        frac = (float(gain_init) - self.gain_min) / (self.gain_max - self.gain_min)
+        frac = min(max(frac, 1e-6), 1.0 - 1e-6)
+        init_logit = math.log(frac / (1.0 - frac))
+        self.gain_logits = nn.Parameter(torch.full((self.in_features,), init_logit))
+
+    def extra_repr(self) -> str:
+        return (
+            f"in_features={self.in_features}, out_features={self.out_features}, "
+            f"bias={self.linear.bias is not None}, "
+            f"gain_min={self.gain_min}, gain_max={self.gain_max}"
+        )
+
+    def gains(self) -> torch.Tensor:
+        sigma = torch.sigmoid(self.gain_logits)
+        return self.gain_min + (self.gain_max - self.gain_min) * sigma
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        g = self.gains().to(dtype=x.dtype, device=x.device)
+        x_scaled = x * g
+        return self.linear(x_scaled)
+
+
+class BoundedSVDLinear(nn.Module):
+    """
+    Linear layer parameterized as
+
+        W = U diag(s) V^T
+
+    with orthogonal U/V factors and singular values constrained to a range
+    [sv_min, sv_max].
+
+    This lets us test the conditioning hypothesis directly:
+      - sv_max controls expansion
+      - sv_min controls collapse
+
+    The layer can be used as a drop-in replacement for nn.Linear inside an MLP.
+    """
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        bias: bool = True,
+        sv_min: float = 0.01,  # 1.0,
+        sv_max: float = 10.0,  # 2.0,
+        learnable_singular_values: bool = True,
+    ):
+        super().__init__()
+        if sv_min <= 0.0:
+            raise ValueError("sv_min must be positive.")
+        if sv_max <= sv_min:
+            raise ValueError("sv_max must be larger than sv_min.")
+
+        self.in_features = int(in_features)
+        self.out_features = int(out_features)
+        self.rank = min(self.in_features, self.out_features)
+        self.sv_min = float(sv_min)
+        self.sv_max = float(sv_max)
+        self.learnable_singular_values = bool(learnable_singular_values)
+
+        # Full orthogonal matrices; we use only the first `rank` columns.
+        self.U = nn.Linear(self.out_features, self.out_features, bias=False)
+        self.V = nn.Linear(self.in_features, self.in_features, bias=False)
+        nn.utils.parametrizations.orthogonal(self.U, "weight")
+        nn.utils.parametrizations.orthogonal(self.V, "weight")
+
+        if bias:
+            self.bias = nn.Parameter(torch.zeros(self.out_features))
+        else:
+            self.register_parameter("bias", None)
+
+        # tensor sv_init 
+        sv_init = (self.sv_min + self.sv_max) / 2
+        # vector sv_init, e.g., emb_dim/2 values 0.005 and emb_dim/2 values 3.0
+        #sv_init = [0.5] * (self.rank // 2) + [1.2] * (self.rank // 2)
+        init_s = self._normalize_sv_init(sv_init)
+        if self.learnable_singular_values:
+            init_logits = self._sv_to_logits(init_s)
+            self.sv_logits = nn.Parameter(init_logits)
+        else:
+            self.register_buffer("sv_fixed", init_s)
+            self.register_parameter("sv_logits", None)
+
+    def extra_repr(self) -> str:
+        return (
+            f"in_features={self.in_features}, out_features={self.out_features}, "
+            f"rank={self.rank}, bias={self.bias is not None}, "
+            f"sv_min={self.sv_min}, sv_max={self.sv_max}, "
+            f"learnable_singular_values={self.learnable_singular_values}"
+        )
+
+    def _normalize_sv_init(self, sv_init: float) -> torch.Tensor:
+        # Tensor input
+        if torch.is_tensor(sv_init):
+            init_s = sv_init.detach().clone().float().reshape(-1)
+            if init_s.numel() == 1:
+                init_s = init_s.expand(self.rank)
+            elif init_s.numel() != self.rank:
+                raise ValueError(
+                    f"sv_init tensor must have 1 or {self.rank} elements, got {init_s.numel()}."
+                )
+        # Python list/tuple input (vector feature)
+        elif isinstance(sv_init, (list, tuple)):
+            init_s = torch.tensor(sv_init, dtype=torch.float32).reshape(-1)
+        else:
+            init_s = torch.full((self.rank,), float(sv_init), dtype=torch.float32)
+
+        init_s = init_s.clamp(min=self.sv_min, max=self.sv_max)
+        return init_s
+
+    def _sv_to_logits(self, s: torch.Tensor) -> torch.Tensor:
+        frac = (s - self.sv_min) / (self.sv_max - self.sv_min)
+        frac = frac.clamp(min=1e-6, max=1.0 - 1e-6)
+        return torch.log(frac / (1.0 - frac))
+
+    def singular_values(self) -> torch.Tensor:
+        if self.learnable_singular_values:
+            sigma = torch.sigmoid(self.sv_logits)
+            return self.sv_min + (self.sv_max - self.sv_min) * sigma
+        return self.sv_fixed
+
+    def weight_matrix(self) -> torch.Tensor:
+        # Both .weight.T tensors are orthogonal square matrices.
+        Umat = self.U.weight.T[:, : self.rank]  # (out, rank)
+        Vmat = self.V.weight.T[:, : self.rank]  # (in, rank)
+        s = self.singular_values().to(dtype=Umat.dtype, device=Umat.device)  # (rank,)
+        return (Umat * s.unsqueeze(0)) @ Vmat.T  # (out, in)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return F.linear(x, self.weight_matrix(), self.bias)
 
 
 class ProductPreservingActivation(nn.Module):

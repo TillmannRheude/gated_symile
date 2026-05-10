@@ -2,19 +2,20 @@ defaults:
   - _self_
   - datamodule: default
   - encoders: synthetic_xnor  # symile_mimic / ukb / synthetic_xnor / mcmed
-  - modelname: clip  # clip / symile / triangle / gram / comm / symile_attention
+  - modelname: symile_attention  # clip / symile / triangle / gram / comm / symile_attention
 
 dataset_name: synthetic_xnor  # symile_mimic / ukb / synthetic_xnor / mcmed
 batch_size: 128
 split_nr: 1
 devices: 1
 
+
 optimizer:
   name: schedulefree_adamw  # 
-  lr: 1e-3
+  lr: 0.0018877976824109184
   lr_gate_mul: 1.0
-  warmup_steps: 0
-  weight_decay: 0.0  # 1e-4
+  warmup_steps: 200
+  weight_decay: 0.01  # 1e-4
   eps: 1e-7
   betas: [0.9, 0.95]
 
