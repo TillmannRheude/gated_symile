@@ -564,7 +564,7 @@ class UKBTabularEncoder(nn.Module):
         prev = input_dim
         for hidden_dim, hidden_dropout in zip(hidden_dims, hidden_dropouts):
             layers.append(nn.Linear(prev, hidden_dim, bias=True))
-            layers.append(nn.GELU())
+            layers.append(nn.LeakyReLU(0.4))  # GELU()
             layers.append(nn.LayerNorm(hidden_dim))
             layers.append(nn.Dropout(hidden_dropout))
             prev = hidden_dim
@@ -729,26 +729,65 @@ class SyntheticXNOREncoder(nn.Module):
         self,
         input_dim: int = 128,
         emb_dim: int = 8192,
-        geometry_preserving: bool = False,
+        geometry_preserving: str = False,
+        bounded_svd_params: dict = {
+            "sv_min": 1.0,
+            "sv_max": 2.0,
+            "learnable_singular_values": True,
+        },
+        activation_fn_params: dict = {
+            "leaky_relu_negative_slope": 0.01,
+        },
     ):
         super().__init__()
         self.input_dim = int(input_dim)
         self.emb_dim = emb_dim
         self.geometry_preserving = geometry_preserving
 
-        if geometry_preserving:
+        from utils import InvertibleTabularAdapter
+        self.input_proj = nn.Linear(input_dim, emb_dim)
+        self.adapter = InvertibleTabularAdapter(
+            dim=emb_dim,
+            num_blocks=2,
+            hidden_dim=emb_dim,
+            dropout=0.0,
+            alpha_init=1e-2,
+        )
+
+        if self.geometry_preserving == "residual":
             self.residual_proj = nn.Linear(input_dim, emb_dim)
 
+        if self.geometry_preserving in {"near_isometric", "orthogonal"}:
+            from utils import NearIsometricLinear
+            linear_cls = NearIsometricLinear
+        elif self.geometry_preserving == "bounded_svd_linear":
+            from utils import BoundedSVDLinear
+            linear_cls = BoundedSVDLinear
+        else:
+            linear_cls = nn.Linear
+
         self.mlp = nn.Sequential(
-            nn.Linear(input_dim, emb_dim),
-            nn.ReLU(),
-            nn.Linear(emb_dim, emb_dim),
-            nn.ReLU(),
-            nn.Linear(emb_dim, emb_dim)
+            linear_cls(input_dim, emb_dim),  # , **bounded_svd_params
+            nn.LeakyReLU(activation_fn_params["leaky_relu_negative_slope"]),  # ReLU
+            linear_cls(emb_dim, emb_dim),  # , **bounded_svd_params
+            nn.LeakyReLU(activation_fn_params["leaky_relu_negative_slope"]),  # ReLU
+            linear_cls(emb_dim, emb_dim)  # , **bounded_svd_params
         )
         self.apply(self._init_weights)
-        if geometry_preserving:
+        if self.geometry_preserving == "spectral":
+            import torch.nn.utils.parametrizations as P
+            for idx, layer in enumerate(self.mlp):
+                if isinstance(layer, nn.Linear):
+                    self.mlp[idx] = P.spectral_norm(layer)
+        if self.geometry_preserving == "orthogonal":
+            import torch.nn.utils.parametrizations as P
+            for idx, layer in enumerate(self.mlp):
+                if isinstance(layer, nn.Linear):
+                    self.mlp[idx] = P.orthogonal(layer)
+
+        if self.geometry_preserving == "identity_init":
             self.init_near_identity_(noise_scale=1e-3)
+        elif self.geometry_preserving == "residual":
             self.init_residual_identity_()
     
     def _init_weights(
@@ -880,10 +919,13 @@ class SyntheticXNOREncoder(nn.Module):
             )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self.geometry_preserving:
+        if self.geometry_preserving == "residual":
             residual = self.residual_proj(x)
             return residual + self.mlp(x)
         return self.mlp(x)
+        #x = self.input_proj(x)
+        #x = self.adapter(x)
+        #return x
 
 
 class SyntheticXNOREncoder_Res(nn.Module):

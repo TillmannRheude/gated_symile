@@ -175,22 +175,30 @@ def build_model(cfg: dict):
     
     # Synthetic XNOR
     if cfg["dataset_name"] == "synthetic_xnor":
+        bounded_svd_params = cfg["encoders"]["bounded_svd_params"]
+        activation_fn_params = cfg["encoders"]["activation_fn_params"]
         encoders = nn.ModuleList([
             SyntheticXNOREncoder(
                 input_dim=cfg["encoders"]["input_dim"], 
                 emb_dim=cfg["modelname"]["emb_dim"],
                 geometry_preserving=cfg["encoders"]["geometry_preserving"],
+                bounded_svd_params=bounded_svd_params,
+                activation_fn_params=activation_fn_params,
             ),
             SyntheticXNOREncoder(
                 input_dim=cfg["encoders"]["input_dim"], 
                 emb_dim=cfg["modelname"]["emb_dim"],
                 geometry_preserving=cfg["encoders"]["geometry_preserving"],
+                bounded_svd_params=bounded_svd_params,
+                activation_fn_params=activation_fn_params,
             ),
             SyntheticXNOREncoder(
                 input_dim=cfg["encoders"]["input_dim"], 
                 emb_dim=cfg["modelname"]["emb_dim"],
                 geometry_preserving=cfg["encoders"]["geometry_preserving"],
-            ),
+                bounded_svd_params=bounded_svd_params,
+                activation_fn_params=activation_fn_params,
+            )
         ])
         model = Contrastive_Model(encoders=encoders)
         if cfg["modelname"]["modelname"] == "symile_attention":
