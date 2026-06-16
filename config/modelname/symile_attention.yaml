@@ -1,19 +1,22 @@
 modelname: symile_attention
 
-emb_dim: 256
+emb_dim: 3072
 
 negative_sampling: pair  # n_squared, pair
 candidate_dependent: True
-logit_scale_init: None
-embedding_norm: False
+logit_scale_init: 0.0  # None 
+embedding_norm: True
 
 transformer_params:
-  d_model: 256
+  d_model: 64
   nhead: 1
-  num_layers: 4
+  num_layers: 2
   dropout: 0.0
+  num_register_tokens: 0
+  use_sigmoid_attention: false
+  use_sinusoidal_pe: false
 
-pair_num_negatives: 128  # number of negatives for pair sampling, 
+pair_num_negatives: 64  # number of negatives for pair sampling, 
 
 use_gate: False
 use_null: True

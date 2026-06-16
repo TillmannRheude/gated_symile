@@ -224,7 +224,7 @@ class UKBModel(LightningModuleParent):
                     return []
 
                 # chunk size (tune for memory/time)
-                chunk_size = int(self.params_method.get("gate_candidate_chunk_size", 256))
+                chunk_size = int(self.params_method.get("gate_candidate_chunk_size", 64))
 
                 sum_w = torch.zeros((M_total,), device=self.device)
                 count_w = 0
@@ -334,7 +334,7 @@ class UKBModel(LightningModuleParent):
                 return []
             D = emb_keep[0].shape[1]
             M_total = len(emb_keep)
-            candidate_chunk_size = int(self.params_method.get("gate_candidate_chunk_size", 256))
+            candidate_chunk_size = int(self.params_method.get("gate_candidate_chunk_size", 64))
             logits_chunks = []
 
             for s in range(0, r_candidates.shape[0], candidate_chunk_size):

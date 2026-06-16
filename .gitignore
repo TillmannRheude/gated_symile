@@ -17,3 +17,7 @@ eval
 config/datamodule/*
 
 __pycache__/
+probe/
+linear_probe_*.py
+test_ckpt/
+eval.ipynb

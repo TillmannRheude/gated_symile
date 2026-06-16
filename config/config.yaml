@@ -1,31 +1,30 @@
 defaults:
   - _self_
   - datamodule: default
-  - encoders: synthetic_xnor  # symile_mimic / ukb / synthetic_xnor / mcmed
-  - modelname: symile_attention  # clip / symile / triangle / gram / comm / symile_attention
+  - encoders: mimic  # symile_mimic / mimic / ukb / synthetic_xnor / symile_xor / mcmed
+  - modelname: triangle  # clip / symile / triangle / gram / comm / symile_attention
 
-dataset_name: synthetic_xnor  # symile_mimic / ukb / synthetic_xnor / mcmed
+dataset_name: mimic  # symile_mimic / mimic / ukb / synthetic_xnor / symile_xor / mcmed
 batch_size: 128
 split_nr: 1
 devices: 1
 
-
 optimizer:
   name: schedulefree_adamw  # 
-  lr: 0.0018877976824109184
+  lr: 3e-4
   lr_gate_mul: 1.0
-  warmup_steps: 200
-  weight_decay: 0.01  # 1e-4
+  warmup_steps: 10
+  weight_decay: 1e-4
   eps: 1e-7
   betas: [0.9, 0.95]
 
 seed: 420
 
-precision: "bf16"
+precision: "bf16"  # "32"
 max_epochs: 25
 patience: 5
-monitor: "val/acc_top1"
-monitor_mode: "max"
+monitor: "val/min_loss"
+monitor_mode: "min"
 wandb:
   project: "gatedsymile"
   group: None

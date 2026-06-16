@@ -82,6 +82,7 @@ class LightningModuleParent(pl.LightningModule):
         self.val_loss_best = MinMetric()
 
         self.val_step_accuracies = []
+        self._jacobian_analysis_batch = None
 
         # Loss functions
         if modelname == "symile":
@@ -98,6 +99,99 @@ class LightningModuleParent(pl.LightningModule):
             self.loss = symile_attention
 
         self.save_hyperparameters()
+
+    def _get_encoder_stack(self):
+        encoders = getattr(self.model, "encoders", None)
+        if encoders is None and hasattr(self.model, "contrastive_model"):
+            encoders = self.model.contrastive_model.encoders
+        return encoders
+
+    def _cpu_detach_structure(self, obj):
+        if torch.is_tensor(obj):
+            return obj.detach().cpu()
+        if isinstance(obj, dict):
+            return {k: self._cpu_detach_structure(v) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return type(obj)(self._cpu_detach_structure(v) for v in obj)
+        return obj
+
+    def _collect_jacobian_analysis_batch(self, batch: dict) -> None:
+        if self._jacobian_analysis_batch is None:
+            self._jacobian_analysis_batch = self._cpu_detach_structure(batch)
+
+    def _get_jacobian_probe_inputs(self, batch: dict):
+        names = getattr(self, "modalities", None)
+        if hasattr(self, "_get_modalities"):
+            try:
+                mods = self._get_modalities(batch)
+                return names, mods
+            except Exception:
+                pass
+
+        if all(k in batch for k in ("A", "B", "C")):
+            return ["A", "B", "C"], [batch["A"], batch["B"], batch["C"]]
+
+        if names and all((name in batch and torch.is_tensor(batch[name])) for name in names):
+            return list(names), [batch[name] for name in names]
+
+        return None, None
+
+    def _get_jacobian_encoder_input(self, name: str, x):
+        if torch.is_tensor(x) and x.shape[0] > 0:
+            return x[0], None
+        return None, None
+
+    def _encoder_jacobian_stats(self, encoder, x0: torch.Tensor, input_builder=None):
+        max_input_elements = int(self.params_method.get("jacobian_max_input_elements", 400000))
+        x0 = x0.detach().clone().to(self.device)
+
+        if x0.numel() > max_input_elements:
+            return None
+
+        if not x0.is_floating_point():
+            x0 = x0.float()
+        x0.requires_grad_(True)
+
+        def f(inp):
+            enc_inp = inp.unsqueeze(0) if input_builder is None else input_builder(inp)
+            return encoder(enc_inp).squeeze(0)
+
+        jac = torch.autograd.functional.jacobian(f, x0, vectorize=True)
+        s = torch.linalg.svdvals(jac.float())
+        s_max = s.max()
+        s_min = s.min()
+        return {
+            "jac_smax": s_max,
+            "jac_smean": s.mean(),
+            "jac_smin": s_min,
+            "jac_cond": s_max / (s_min + 1e-8),
+        }
+
+    def _log_encoder_jacobian_stats(self, split: str = "val") -> None:
+        if self._jacobian_analysis_batch is None or not self.trainer.is_global_zero:
+            return
+
+        encoders = self._get_encoder_stack()
+        if encoders is None:
+            return
+
+        batch = self._jacobian_analysis_batch
+        names, raw_inputs = self._get_jacobian_probe_inputs(batch)
+        if not names or raw_inputs is None:
+            return
+
+        for name, encoder, x in zip(names, encoders, raw_inputs):
+            x0, input_builder = self._get_jacobian_encoder_input(name, x)
+            if x0 is None:
+                continue
+            try:
+                stats = self._encoder_jacobian_stats(encoder, x0, input_builder=input_builder)
+            except Exception:
+                continue
+            if stats is None:
+                continue
+            for key, value in stats.items():
+                self.log(f"{split}/analysis_{name}_{key}", value, on_step=False, on_epoch=True, sync_dist=False)
 
     def forward(
         self, 
@@ -740,23 +834,44 @@ class LightningModuleParent(pl.LightningModule):
         
     def validation_step(self, batch, batch_idx):
         loss, embeddings = self.shared_step(batch, "val", return_embeddings=True)
+        self._collect_jacobian_analysis_batch(batch)
 
         if hasattr(self, "retrieval_step"):
-            accs = self.retrieval_step(batch, embeddings, split="val") or []
+            retrieval_out = self.retrieval_step(batch, embeddings, split="val")
 
             ddp = dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1
 
-            # local stats (can be zero-length)
-            correct = float(sum(accs))
-            count = float(len(accs))
+            if isinstance(retrieval_out, dict):
+                stats = torch.tensor(
+                    [
+                        float(retrieval_out.get("correct_top1", 0.0)),
+                        float(retrieval_out.get("correct_top5", 0.0)),
+                        float(retrieval_out.get("correct_top10", 0.0)),
+                        float(retrieval_out.get("correct_top100", 0.0)),
+                        float(retrieval_out.get("count", 0.0)),
+                    ],
+                    device=self.device,
+                    dtype=torch.float32,
+                )
+                if ddp:
+                    dist.all_reduce(stats, op=dist.ReduceOp.SUM)
 
-            stats = torch.tensor([correct, count], device=self.device, dtype=torch.float32)
-            if ddp:
-                dist.all_reduce(stats, op=dist.ReduceOp.SUM)
+                if self.trainer.is_global_zero and stats[4].item() > 0:
+                    self.val_step_accuracies.append(tuple(float(x.item()) for x in stats))
+            else:
+                accs = retrieval_out or []
 
-            # store per-step global stats on rank 0 only
-            if self.trainer.is_global_zero and count > 0:
-                self.val_step_accuracies.append((float(stats[0].item()), float(stats[1].item())))
+                # local stats (can be zero-length)
+                correct = float(sum(accs))
+                count = float(len(accs))
+
+                stats = torch.tensor([correct, count], device=self.device, dtype=torch.float32)
+                if ddp:
+                    dist.all_reduce(stats, op=dist.ReduceOp.SUM)
+
+                # store per-step global stats on rank 0 only
+                if self.trainer.is_global_zero and count > 0:
+                    self.val_step_accuracies.append((float(stats[0].item()), float(stats[1].item())))
 
         return loss
 
@@ -764,19 +879,38 @@ class LightningModuleParent(pl.LightningModule):
         loss, embeddings = self.shared_step(batch, "test", return_embeddings=True)
 
         if hasattr(self, "retrieval_step"):
-            accs = self.retrieval_step(batch, embeddings, split="test") or []
+            retrieval_out = self.retrieval_step(batch, embeddings, split="test")
 
             ddp = dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1
 
-            correct = float(sum(accs))
-            count = float(len(accs))
+            if isinstance(retrieval_out, dict):
+                stats = torch.tensor(
+                    [
+                        float(retrieval_out.get("correct_top1", 0.0)),
+                        float(retrieval_out.get("correct_top5", 0.0)),
+                        float(retrieval_out.get("correct_top10", 0.0)),
+                        float(retrieval_out.get("correct_top100", 0.0)),
+                        float(retrieval_out.get("count", 0.0)),
+                    ],
+                    device=self.device,
+                    dtype=torch.float32,
+                )
+                if ddp:
+                    dist.all_reduce(stats, op=dist.ReduceOp.SUM)
 
-            stats = torch.tensor([correct, count], device=self.device, dtype=torch.float32)
-            if ddp:
-                dist.all_reduce(stats, op=dist.ReduceOp.SUM)
+                if self.trainer.is_global_zero and stats[4].item() > 0:
+                    self.test_step_accuracies.append(tuple(float(x.item()) for x in stats))
+            else:
+                accs = retrieval_out or []
+                correct = float(sum(accs))
+                count = float(len(accs))
 
-            if self.trainer.is_global_zero and count > 0:
-                self.test_step_accuracies.append((float(stats[0].item()), float(stats[1].item())))
+                stats = torch.tensor([correct, count], device=self.device, dtype=torch.float32)
+                if ddp:
+                    dist.all_reduce(stats, op=dist.ReduceOp.SUM)
+
+                if self.trainer.is_global_zero and count > 0:
+                    self.test_step_accuracies.append((float(stats[0].item()), float(stats[1].item())))
 
         return loss
 
@@ -812,6 +946,7 @@ class LightningModuleParent(pl.LightningModule):
         self.set_optimizer_mode(mode="eval")
     
     def on_validation_epoch_start(self):
+        self._jacobian_analysis_batch = None
         if hasattr(self, "build_candidate_bank"):
             self.candidate_bank = self.build_candidate_bank(split="val")
         else:
@@ -822,6 +957,8 @@ class LightningModuleParent(pl.LightningModule):
         if getattr(self.trainer, "sanity_checking", False):
             self.val_step_accuracies.clear()
             return
+
+        self._log_encoder_jacobian_stats(split="val")
 
         current = self.trainer.callback_metrics.get("val/loss")
         self.val_loss_best.update(current)
@@ -835,24 +972,47 @@ class LightningModuleParent(pl.LightningModule):
         if hasattr(self, "retrieval_step"):
             # Only rank 0 has the list populated (see validation_step).
             if self.trainer.is_global_zero and self.val_step_accuracies:
-                total_correct = sum(c for c, n in self.val_step_accuracies)
-                total_count = sum(n for c, n in self.val_step_accuracies)
-                acc_top1 = (total_correct / total_count) if total_count > 0 else float("nan")
+                if len(self.val_step_accuracies[0]) == 5:
+                    total_correct_top1 = sum(c1 for c1, _, _, _, _ in self.val_step_accuracies)
+                    total_correct_top5 = sum(c5 for _, c5, _, _, _ in self.val_step_accuracies)
+                    total_correct_top10 = sum(c10 for _, _, c10, _, _ in self.val_step_accuracies)
+                    total_correct_top100 = sum(c100 for _, _, _, c100, _ in self.val_step_accuracies)
+                    total_count = sum(n for _, _, _, _, n in self.val_step_accuracies)
+                    acc_top1 = (total_correct_top1 / total_count) if total_count > 0 else float("nan")
+                    acc_top5 = (total_correct_top5 / total_count) if total_count > 0 else float("nan")
+                    acc_top10 = (total_correct_top10 / total_count) if total_count > 0 else float("nan")
+                    acc_top100 = (total_correct_top100 / total_count) if total_count > 0 else float("nan")
+                else:
+                    total_correct = sum(c for c, n in self.val_step_accuracies)
+                    total_count = sum(n for c, n in self.val_step_accuracies)
+                    acc_top1 = (total_correct / total_count) if total_count > 0 else float("nan")
+                    acc_top5 = float("nan")
+                    acc_top10 = float("nan")
+                    acc_top100 = float("nan")
             else:
                 acc_top1 = float("nan")
+                acc_top5 = float("nan")
+                acc_top10 = float("nan")
+                acc_top100 = float("nan")
             self.val_step_accuracies.clear()
 
-            acc_t = torch.tensor(acc_top1, device=self.device)
+            acc_t = torch.tensor([acc_top1, acc_top5, acc_top10, acc_top100], device=self.device)
             if ddp:
                 dist.broadcast(acc_t, src=0)
 
-            acc_val = float(acc_t.item())
+            acc_val = float(acc_t[0].item())
             if acc_val == acc_val:  # not NaN
                 if acc_val > self.best_acc_top1s["val"]:
                     self.best_acc_top1s["val"] = acc_val
 
             # Log on ALL ranks so EarlyStopping sees the metric everywhere
-            self.log("val/acc_top1", acc_t, prog_bar=True, sync_dist=False, rank_zero_only=False)
+            self.log("val/acc_top1", acc_t[0], prog_bar=True, sync_dist=False, rank_zero_only=False)
+            if float(acc_t[1].item()) == float(acc_t[1].item()):
+                self.log("val/acc_top5", acc_t[1], prog_bar=False, sync_dist=False, rank_zero_only=False)
+            if float(acc_t[2].item()) == float(acc_t[2].item()):
+                self.log("val/acc_top10", acc_t[2], prog_bar=False, sync_dist=False, rank_zero_only=False)
+            if float(acc_t[3].item()) == float(acc_t[3].item()):
+                self.log("val/acc_top100", acc_t[3], prog_bar=False, sync_dist=False, rank_zero_only=False)
             self.log(
                 "val/max_acc_top1",
                 torch.tensor(self.best_acc_top1s["val"], device=self.device),
@@ -915,12 +1075,32 @@ class LightningModuleParent(pl.LightningModule):
                 self.test_step_accuracies.clear()
                 return
 
-            total_correct = sum(c for c, n in self.test_step_accuracies)
-            total_count = sum(n for c, n in self.test_step_accuracies)
-            acc_top1 = (total_correct / total_count) if total_count > 0 else float("nan")
+            if len(self.test_step_accuracies[0]) == 5:
+                total_correct_top1 = sum(c1 for c1, _, _, _, _ in self.test_step_accuracies)
+                total_correct_top5 = sum(c5 for _, c5, _, _, _ in self.test_step_accuracies)
+                total_correct_top10 = sum(c10 for _, _, c10, _, _ in self.test_step_accuracies)
+                total_correct_top100 = sum(c100 for _, _, _, c100, _ in self.test_step_accuracies)
+                total_count = sum(n for _, _, _, _, n in self.test_step_accuracies)
+                acc_top1 = (total_correct_top1 / total_count) if total_count > 0 else float("nan")
+                acc_top5 = (total_correct_top5 / total_count) if total_count > 0 else float("nan")
+                acc_top10 = (total_correct_top10 / total_count) if total_count > 0 else float("nan")
+                acc_top100 = (total_correct_top100 / total_count) if total_count > 0 else float("nan")
+            else:
+                total_correct = sum(c for c, n in self.test_step_accuracies)
+                total_count = sum(n for c, n in self.test_step_accuracies)
+                acc_top1 = (total_correct / total_count) if total_count > 0 else float("nan")
+                acc_top5 = float("nan")
+                acc_top10 = float("nan")
+                acc_top100 = float("nan")
 
             self.test_step_accuracies.clear()
             self.log("test/acc_top1", acc_top1, sync_dist=False, rank_zero_only=False, prog_bar=False)
+            if acc_top5 == acc_top5:
+                self.log("test/acc_top5", acc_top5, sync_dist=False, rank_zero_only=False, prog_bar=False)
+            if acc_top10 == acc_top10:
+                self.log("test/acc_top10", acc_top10, sync_dist=False, rank_zero_only=False, prog_bar=False)
+            if acc_top100 == acc_top100:
+                self.log("test/acc_top100", acc_top100, sync_dist=False, rank_zero_only=False, prog_bar=False)
             return
 
         # Case 2: models with run_zeroshot_retrieval (e.g., MIMIC)

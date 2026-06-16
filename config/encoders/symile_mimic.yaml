@@ -4,3 +4,6 @@ defaults:
 monitor:
   metric: "val/acc_top1"
   mode: "max"
+
+geometry_preserving: False
+leaky_relu_negative_slope: 0.0

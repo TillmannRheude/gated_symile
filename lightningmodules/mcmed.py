@@ -4,6 +4,7 @@ import torch.nn as nn
 
 from lightningmodules.utils import LightningModuleParent
 from losses.retrieval import zeroshot_retrieval_logits
+from losses.utils import scale_mip_dvs
 
 
 class MCMEDModel(LightningModuleParent):
@@ -14,6 +15,7 @@ class MCMEDModel(LightningModuleParent):
             "batch_size": 128,
             "split_nr": 0,
         },
+        candidate_idx: int = 1,
         **args,
     ):
         super().__init__(**args)
@@ -21,9 +23,20 @@ class MCMEDModel(LightningModuleParent):
         self.dataset_name = "mcmed"
         self.model = model
         self.params_retrival_ds = params_retrival_ds
+        self.retrieval_mode = str(self.params_retrival_ds.get("retrieval_mode", "global")).lower()
+        self.preselected_num_candidates = int(self.params_retrival_ds.get("preselected_num_candidates", 10))
+        self.retrieval_seed = int(self.params_retrival_ds.get("retrieval_seed", 420))
+        if self.retrieval_mode not in {"global", "preselected"}:
+            raise ValueError(f"Unsupported retrieval_mode={self.retrieval_mode}. Expected 'global' or 'preselected'.")
+        if self.preselected_num_candidates < 1:
+            raise ValueError(
+                f"preselected_num_candidates must be >= 1, got {self.preselected_num_candidates}."
+            )
 
-        self.modalities = ["waveforms_II", "rads", "numerics"]
-        self.candidate_idx = 1  # retrieve rads from (waveforms_II, numerics)
+        self.modalities = ["demographics", "rads", "numerics"]  # "waveforms_II",
+        self.candidate_idx = int(candidate_idx)
+        if self.candidate_idx < 0 or self.candidate_idx >= len(self.modalities):
+            raise ValueError(f"candidate_idx must be in [0, {len(self.modalities) - 1}], got {self.candidate_idx}.")
 
         self.test_step_accuracies = []
 
@@ -56,16 +69,83 @@ class MCMEDModel(LightningModuleParent):
         return encoders
 
     def forward(self, batch):
-        x = [
-            batch["waveforms_II"],
-            batch["rads"]["tokenized_impression_texts"],
-            batch["numerics"],
-        ]
+        x = self._get_modalities(batch)
         return self.model(x)
 
-    @staticmethod
-    def _index_tokenized_batch(tokenized_batch: dict[str, torch.Tensor], mask: torch.Tensor) -> dict[str, torch.Tensor]:
-        return {k: v[mask] for k, v in tokenized_batch.items()}
+    def _get_modalities(self, batch):
+        return [
+            batch["demographics"],
+            # batch["waveforms_II"],
+            batch["rads"],
+            batch["numerics"],
+        ]
+
+    def _get_jacobian_encoder_input(self, name: str, x):
+        if name == "demographics" and isinstance(x, dict):
+            cont = x.get("continuous", None)
+            if not torch.is_tensor(cont) or cont.shape[0] == 0:
+                return None, None
+            cont_mask = x.get("continuous_mask", None)
+            cat = x.get("categorical", None)
+            cat_mask = x.get("categorical_mask", None)
+            if not torch.is_tensor(cont_mask) or cont_mask.shape[0] == 0:
+                cont_mask0 = torch.ones_like(cont[0], dtype=torch.bool)
+            else:
+                cont_mask0 = cont_mask[0].detach().clone()
+            if not torch.is_tensor(cat) or cat.shape[0] == 0:
+                cat0 = torch.zeros((0,), dtype=torch.long, device=cont.device)
+            else:
+                cat0 = cat[0].detach().clone()
+            if not torch.is_tensor(cat_mask) or cat_mask.shape[0] == 0:
+                cat_mask0 = torch.ones_like(cat0, dtype=torch.bool)
+            else:
+                cat_mask0 = cat_mask[0].detach().clone()
+
+            def _builder(inp):
+                return {
+                    "continuous": inp.unsqueeze(0),
+                    "continuous_mask": cont_mask0.to(device=inp.device, dtype=torch.bool).unsqueeze(0),
+                    "categorical": cat0.to(device=inp.device, dtype=torch.long).unsqueeze(0),
+                    "categorical_mask": cat_mask0.to(device=inp.device, dtype=torch.bool).unsqueeze(0),
+                }
+
+            return cont[0], _builder
+
+        if name == "rads" and isinstance(x, dict):
+            visits = x.get("input_ids", None)
+            if not torch.is_tensor(visits) or visits.shape[0] == 0:
+                return None, None
+            attention_mask = x.get("attention_mask", None)
+            if torch.is_tensor(attention_mask) and attention_mask.shape[0] > 0:
+                attn0 = attention_mask[0].detach().clone()
+            else:
+                attn0 = torch.zeros_like(visits[0], dtype=torch.bool)
+
+            def _builder(inp):
+                report_mask = x.get("report_mask", None)
+                if torch.is_tensor(report_mask) and report_mask.shape[0] > 0:
+                    report_mask0 = report_mask[0].detach().clone()
+                else:
+                    report_mask0 = torch.ones(inp.shape[0], dtype=torch.bool)
+                return {
+                    "input_ids": inp.unsqueeze(0),
+                    "attention_mask": attn0.to(device=inp.device, dtype=torch.bool).unsqueeze(0),
+                    "report_mask": report_mask0.to(device=inp.device, dtype=torch.bool).unsqueeze(0),
+                }
+
+            return visits[0], _builder
+
+        if name == "numerics" and isinstance(x, dict):
+            trends = x.get("trend_values", None)
+            if not torch.is_tensor(trends) or trends.shape[0] == 0:
+                return None, None
+
+            def _builder(inp):
+                return {"trend_values": inp.unsqueeze(0)}
+
+            return trends[0], _builder
+
+        return super()._get_jacobian_encoder_input(name, x)
 
     @staticmethod
     def _tensor_modality_present(x: torch.Tensor) -> torch.Tensor:
@@ -86,28 +166,169 @@ class MCMEDModel(LightningModuleParent):
             return batch_numerics["bin_counts"].to(dtype=torch.long).gt(0).any(dim=1)
         return MCMEDModel._tensor_modality_present(batch_numerics["values"])
 
-    @staticmethod
-    def _normalize_report_texts(batch_texts) -> list[str]:
-        normalized = []
-        for sample_texts in batch_texts:
-            if isinstance(sample_texts, str):
-                text = sample_texts.strip()
-            elif isinstance(sample_texts, (list, tuple)):
-                text = " ".join(str(t).strip() for t in sample_texts if str(t).strip())
-            else:
-                text = ""
-            normalized.append(text)
-        return normalized
+    def _radiology_present(self, batch_rads: dict) -> torch.Tensor:
+        if "embedding_present" in batch_rads:
+            return batch_rads["embedding_present"].to(device=self.device, dtype=torch.bool)
+        if "report_mask" in batch_rads:
+            return batch_rads["report_mask"].to(device=self.device, dtype=torch.bool).any(dim=1)
+        return self._tensor_modality_present(batch_rads["visit_embedding"]).to(self.device)
+    
+    def _demographics_present(self, batch_demographics: dict) -> torch.Tensor:
+        if "embedding_present" in batch_demographics:
+            return batch_demographics["embedding_present"].to(device=self.device, dtype=torch.bool)
+        if "continuous_mask" in batch_demographics:
+            cont = batch_demographics["continuous_mask"].to(device=self.device, dtype=torch.bool).any(dim=1)
+        else:
+            cont = None
+        if "categorical_mask" in batch_demographics:
+            cat = batch_demographics["categorical_mask"].to(device=self.device, dtype=torch.bool).any(dim=1)
+        else:
+            cat = None
+        if cont is None and cat is None:
+            return self._tensor_modality_present(batch_demographics["continuous"]).to(self.device)
+        if cont is None:
+            return cat
+        if cat is None:
+            return cont
+        return cont | cat
 
-    def _radiology_present(self, batch_texts) -> torch.Tensor:
-        normalized = self._normalize_report_texts(batch_texts)
-        return torch.tensor([len(text) > 0 for text in normalized], dtype=torch.bool, device=self.device)
+    def _modality_present(self, batch, modality_idx: int) -> torch.Tensor:
+        name = self.modalities[int(modality_idx)]
+        if name == "waveforms_II":
+            return self._waveform_present(batch[name]).to(self.device)
+        if name == "demographics":
+            return self._demographics_present(batch[name]).to(self.device)
+        if name == "rads":
+            return self._radiology_present(batch[name]).to(self.device)
+        if name == "numerics":
+            return self._numerics_present(batch[name]).to(self.device)
+        raise ValueError(f"Unknown MC-MED modality: {name}")
+
+    @staticmethod
+    def _index_modality(modality, mask: torch.Tensor):
+        if torch.is_tensor(modality):
+            return modality[mask]
+        if isinstance(modality, dict):
+            return {
+                key: value[mask] if torch.is_tensor(value) and value.shape[0] == mask.shape[0] else value
+                for key, value in modality.items()
+            }
+        raise TypeError(f"Unsupported modality payload type: {type(modality)}")
 
     def _query_keep_mask(self, batch) -> torch.Tensor:
-        waveform_present = self._waveform_present(batch["waveforms_II"]).to(self.device)
-        numerics_present = self._numerics_present(batch["numerics"]).to(self.device)
-        rads_present = self._radiology_present(batch["rads"]["impression_texts"])
-        return waveform_present & numerics_present & rads_present
+        target_present = self._modality_present(batch, self.candidate_idx)
+        query_indices = [i for i in range(len(self.modalities)) if i != self.candidate_idx]
+        query_present = [self._modality_present(batch, i) for i in query_indices]
+        present_count = torch.stack([m.float() for m in query_present], dim=0).sum(dim=0)
+        return target_present & (present_count > 0)
+
+    @staticmethod
+    def _empty_retrieval_counts() -> dict:
+        return {
+            "count": 0.0,
+            "correct_top1": 0.0,
+            "correct_top5": 0.0,
+            "correct_top10": 0.0,
+            "correct_top100": 0.0,
+        }
+
+    @staticmethod
+    def _topk_retrieval_counts(logits: torch.Tensor, labels: torch.Tensor, csn_bank: torch.Tensor) -> dict:
+        out = {"count": float(labels.shape[0])}
+        n_candidates = int(logits.shape[1])
+        for k in (1, 5, 10, 100):
+            k_eff = min(k, n_candidates)
+            topk_idx = torch.topk(logits, k=k_eff, dim=1).indices
+            if csn_bank.ndim == 1:
+                topk_csn = csn_bank[topk_idx]
+            else:
+                topk_csn = torch.gather(csn_bank, dim=1, index=topk_idx)
+            hit = (topk_csn == labels.unsqueeze(1)).any(dim=1)
+            out[f"correct_top{k}"] = float(hit.sum().item())
+        return out
+
+    @staticmethod
+    def _unique_candidates_by_csn(r_bank: torch.Tensor, csn_bank: torch.Tensor):
+        """
+        Keep one candidate per CSN (first occurrence, stable order).
+        """
+        if r_bank is None or csn_bank is None or csn_bank.numel() == 0:
+            return r_bank, csn_bank
+
+        keep_indices = []
+        seen = set()
+        csn_cpu = csn_bank.detach().cpu().tolist()
+        for idx, csn in enumerate(csn_cpu):
+            csn_i = int(csn)
+            if csn_i in seen:
+                continue
+            seen.add(csn_i)
+            keep_indices.append(idx)
+
+        if len(keep_indices) == csn_bank.shape[0]:
+            return r_bank, csn_bank
+
+        keep_t = torch.tensor(keep_indices, device=csn_bank.device, dtype=torch.long)
+        return r_bank.index_select(0, keep_t), csn_bank.index_select(0, keep_t)
+
+    def _apply_preselected_candidates(
+        self,
+        logits: torch.Tensor,
+        labels: torch.Tensor,
+        csn_bank: torch.Tensor,
+    ):
+        """
+        Build a per-query preselected candidate set:
+        [positive candidate] + [random negatives].
+        Returns logits_sel (B_keep, K), labels_sel (B_keep,), csn_sel (B_keep, K).
+        """
+        n_queries, n_candidates = int(logits.shape[0]), int(logits.shape[1])
+        k = min(int(self.preselected_num_candidates), n_candidates)
+        if n_queries == 0 or n_candidates == 0:
+            return None, None, None
+
+        selected_logits = []
+        selected_labels = []
+        selected_csns = []
+        csn_bank_cpu = csn_bank.detach().cpu()
+
+        for i in range(n_queries):
+            y_i = labels[i]
+            pos = torch.nonzero(csn_bank == y_i, as_tuple=False).flatten()
+            if pos.numel() == 0:
+                continue
+            pos_idx = int(pos[0].item())
+
+            if k == 1:
+                idx = torch.tensor([pos_idx], device=logits.device, dtype=torch.long)
+            else:
+                neg_idx = torch.arange(n_candidates, device=logits.device, dtype=torch.long)
+                neg_idx = neg_idx[neg_idx != pos_idx]
+                k_neg = min(k - 1, int(neg_idx.numel()))
+
+                # deterministic per-query sampling for stable eval
+                g = torch.Generator(device="cpu")
+                y_seed = int(labels[i].detach().cpu().item())
+                g.manual_seed(self.retrieval_seed + (104729 * i) + y_seed)
+                perm = torch.randperm(int(neg_idx.numel()), generator=g, device="cpu")[:k_neg].to(neg_idx.device)
+                neg_pick = neg_idx.index_select(0, perm)
+                idx = torch.cat(
+                    [torch.tensor([pos_idx], device=logits.device, dtype=torch.long), neg_pick],
+                    dim=0,
+                )
+
+            selected_logits.append(logits[i].index_select(0, idx))
+            selected_labels.append(labels[i])
+            selected_csns.append(csn_bank.index_select(0, idx))
+
+        if len(selected_logits) == 0:
+            return None, None, None
+
+        return (
+            torch.stack(selected_logits, dim=0),
+            torch.stack(selected_labels, dim=0),
+            torch.stack(selected_csns, dim=0),
+        )
 
     def build_candidate_bank(self, split):
         r_list, csn_list = [], []
@@ -115,14 +336,16 @@ class MCMEDModel(LightningModuleParent):
         encoder_stack = self._get_encoder_stack()
 
         for batch in dl:
-            rads_present = self._radiology_present(batch["rads"]["impression_texts"])
-            if rads_present.sum().item() == 0:
+            batch = self.trainer.strategy.batch_to_device(batch, self.device)
+            target_present = self._modality_present(batch, self.candidate_idx)
+            if target_present.sum().item() == 0:
                 continue
 
-            csn = batch["CSN"].to(self.device)[rads_present]
-            tokenized = self._index_tokenized_batch(batch["rads"]["tokenized_impression_texts"], rads_present.cpu())
+            csn = batch["CSN"].to(self.device)[target_present]
+            target_name = self.modalities[self.candidate_idx]
+            target_batch = self._index_modality(batch[target_name], target_present)
 
-            reps = encoder_stack[self.candidate_idx](tokenized)
+            reps = encoder_stack[self.candidate_idx](target_batch)
             if self.params_method.get("embedding_norm", False):
                 reps = nn.functional.normalize(reps, dim=1)
 
@@ -143,7 +366,8 @@ class MCMEDModel(LightningModuleParent):
         if not ddp:
             if r_local is None:
                 return None
-            return {"r": r_local, "csn": csn_local}
+            r_unique, csn_unique = self._unique_candidates_by_csn(r_local, csn_local)
+            return {"r": r_unique, "csn": csn_unique}
 
         emb_dim_t = torch.tensor([emb_dim_local], device=self.device, dtype=torch.long)
         emb_dims = [torch.empty_like(emb_dim_t) for _ in range(dist.get_world_size())]
@@ -174,30 +398,31 @@ class MCMEDModel(LightningModuleParent):
         r_full = torch.cat([r_gather[i][:lens[i]] for i in range(dist.get_world_size())], dim=0)
         csn_full = torch.cat([csn_gather[i][:lens[i]] for i in range(dist.get_world_size())], dim=0)
 
-        return {"r": r_full, "csn": csn_full}
+        r_unique, csn_unique = self._unique_candidates_by_csn(r_full, csn_full)
+        return {"r": r_unique, "csn": csn_unique}
 
     def retrieval_step(self, batch, embeddings, split):
         bank = getattr(self, "candidate_bank", None)
         if bank is None:
-            return []
+            return self._empty_retrieval_counts()
 
         keep = self._query_keep_mask(batch)
         if keep.sum().item() == 0:
-            return []
+            return self._empty_retrieval_counts()
 
-        r_wave = embeddings[0][keep]
-        r_rads = embeddings[1][keep]
-        r_num = embeddings[2][keep]
+        query_indices = [i for i in range(len(embeddings)) if i != self.candidate_idx]
+        emb_keep = [embeddings[i][keep] for i in range(len(embeddings))]
+        rep_list = [emb_keep[i] for i in query_indices]
         y = batch["CSN"].to(self.device)[keep]
 
-        if self.use_gate and self.gate is not None:
-            emb_keep = [r_wave, r_rads, r_num]
+        csn_candidates = bank["csn"]
+        logits_precomputed = None
 
+        if self.use_gate and self.gate is not None:
             if getattr(self.gate, "gate_mode", None) == "attention":
-                Bq = emb_keep[0].shape[0]
-                D = emb_keep[0].shape[1]
+                Bq = emb_keep[self.candidate_idx].shape[0]
+                D = emb_keep[self.candidate_idx].shape[1]
                 r_candidates = bank["r"]
-                csn_candidates = bank["csn"]
                 chunk_size = int(self.params_method.get("gate_candidate_chunk_size", 256))
                 logits_chunks = []
 
@@ -205,11 +430,13 @@ class MCMEDModel(LightningModuleParent):
                     cand = r_candidates[s : s + chunk_size]
                     nc = cand.shape[0]
 
-                    pair_embs = [
-                        emb_keep[0].unsqueeze(1).expand(Bq, nc, D).reshape(Bq * nc, D),
-                        cand.unsqueeze(0).expand(Bq, nc, D).reshape(Bq * nc, D),
-                        emb_keep[2].unsqueeze(1).expand(Bq, nc, D).reshape(Bq * nc, D),
-                    ]
+                    pair_embs = []
+                    for m in range(len(emb_keep)):
+                        if m == self.candidate_idx:
+                            x = cand.unsqueeze(0).expand(Bq, nc, D).reshape(Bq * nc, D)
+                        else:
+                            x = emb_keep[m].unsqueeze(1).expand(Bq, nc, D).reshape(Bq * nc, D)
+                        pair_embs.append(x)
 
                     W_pair = self.gate.compute_W(pair_embs)
                     gated_list, w_pair, _ = self.gate.apply_for_target(self.candidate_idx, pair_embs, W=W_pair)
@@ -221,39 +448,45 @@ class MCMEDModel(LightningModuleParent):
                     self._log_gate_cos_alignment(pair_slice, gated_slice, split=split, names=self.modalities)
                     self._log_gate_cos_to_neutral(self.gate, gated_slice, split=split, names=self.modalities)
 
-                    prod = gated_list[0] * gated_list[2]
-                    raw = (prod * pair_embs[1]).sum(dim=1).view(Bq, nc)
+                    prod = torch.ones_like(gated_list[query_indices[0]])
+                    for qi in query_indices:
+                        prod = prod * gated_list[qi]
+                    raw = (prod * pair_embs[self.candidate_idx]).sum(dim=1).view(Bq, nc)
+                    raw = scale_mip_dvs(raw, d=D, M=len(query_indices) + 1)
                     logits_chunks.append(raw)
 
                 logits = torch.cat(logits_chunks, dim=1)
                 scale = self.get_logit_scale_exp()
                 if scale is not None:
                     logits = scale * logits
-                pred = csn_candidates[torch.argmax(logits, dim=1)]
-                return (y == pred).float().tolist()
+                logits_precomputed = logits
+            else:
+                W = self.gate.compute_W(emb_keep)
+                gated_list, w_t, _ = self.gate.apply_for_target(self.candidate_idx, emb_keep, W=W)
+                self._log_gate_weights(w_t, set=split)
+                self._log_gate_cos_alignment(emb_keep, gated_list, split=split, names=self.modalities)
+                self._log_gate_cos_to_neutral(self.gate, gated_list, split=split, names=self.modalities)
+                if hasattr(self.gate, "logit_gate_strength"):
+                    alpha = torch.sigmoid(self.gate.logit_gate_strength.detach())
+                    self.log(f"{split}/gate_alpha", alpha, on_step=False, on_epoch=True, sync_dist=True)
+                rep_list = [gated_list[i] for i in query_indices]
 
-            W = self.gate.compute_W(emb_keep)
-            gated_list, w_t, _ = self.gate.apply_for_target(self.candidate_idx, emb_keep, W=W)
-            self._log_gate_weights(w_t, set=split)
-            self._log_gate_cos_alignment(emb_keep, gated_list, split=split, names=self.modalities)
-            self._log_gate_cos_to_neutral(self.gate, gated_list, split=split, names=self.modalities)
-            if hasattr(self.gate, "logit_gate_strength"):
-                alpha = torch.sigmoid(self.gate.logit_gate_strength.detach())
-                self.log(f"{split}/gate_alpha", alpha, on_step=False, on_epoch=True, sync_dist=True)
-            rep_list = [gated_list[0], gated_list[2]]
-        else:
-            rep_list = [r_wave, r_num]
-
-        if self.modelname == "symile_attention":
-            Bq = int(r_wave.shape[0])
-            D = int(r_wave.shape[1])
+        if logits_precomputed is not None:
+            logits = logits_precomputed
+        elif self.modelname == "symile_attention":
+            Bq = int(emb_keep[0].shape[0])
+            D = int(emb_keep[0].shape[1])
             Nc = int(bank["r"].shape[0])
 
-            wave_pair = r_wave.unsqueeze(1).expand(Bq, Nc, D).reshape(Bq * Nc, D)
-            rads_pair = bank["r"].unsqueeze(0).expand(Bq, Nc, D).reshape(Bq * Nc, D)
-            num_pair = r_num.unsqueeze(1).expand(Bq, Nc, D).reshape(Bq * Nc, D)
+            pair_embs = []
+            for m in range(len(emb_keep)):
+                if m == self.candidate_idx:
+                    x = bank["r"].unsqueeze(0).expand(Bq, Nc, D).reshape(Bq * Nc, D)
+                else:
+                    x = emb_keep[m].unsqueeze(1).expand(Bq, Nc, D).reshape(Bq * Nc, D)
+                pair_embs.append(x)
 
-            z = self.model.transformer([wave_pair, rads_pair, num_pair])
+            z = self.model.transformer(pair_embs)
             if z.dim() == 2 and z.shape[1] == 1:
                 z = z.squeeze(1)
             elif z.dim() != 1:
@@ -274,5 +507,14 @@ class MCMEDModel(LightningModuleParent):
                 modelname=self.modelname,
             )
 
-        pred = bank["csn"][torch.argmax(logits, dim=1)]
-        return (y == pred).float().tolist()
+        if self.retrieval_mode == "preselected":
+            logits_sel, y_sel, csn_sel = self._apply_preselected_candidates(
+                logits=logits,
+                labels=y,
+                csn_bank=csn_candidates,
+            )
+            if logits_sel is None:
+                return self._empty_retrieval_counts()
+            return self._topk_retrieval_counts(logits_sel, y_sel, csn_sel)
+
+        return self._topk_retrieval_counts(logits, y, csn_candidates)

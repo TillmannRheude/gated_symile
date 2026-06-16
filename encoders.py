@@ -3,8 +3,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from torchvision import models
-from transformers import AutoModel, BertConfig, BertModel, BertTokenizer
+from transformers import AutoModel
 
+from utils import _MCMEDResBlock1D
 
 def _init_linear_near_identity_(layer: nn.Linear, noise_scale: float = 1e-3) -> None:
     """
@@ -36,17 +37,20 @@ class CXREncoder(nn.Module):
             "weights": None,  # "IMAGENET1K_V2"
             "norm_type": "batchnorm",
         },
-        emb_dim: int = 8192
+        emb_dim: int = 8192,
+        geometry_preserving: bool = False,
     ):
         super().__init__()
         self.emb_dim = emb_dim
+        self.geometry_preserving = bool(geometry_preserving)
 
         self.resnet = models.resnet50(weights=resnet_params["weights"])
         self.resnet.fc = nn.Linear(self.resnet.fc.in_features, emb_dim, bias=True)
 
         nn.init.kaiming_normal_(self.resnet.fc.weight, mode="fan_out")
         nn.init.zeros_(self.resnet.fc.bias)
-        self.init_near_identity_()
+        #if self.geometry_preserving:
+        #    self.init_near_identity_()
 
     def init_near_identity_(self, noise_scale: float = 1e-3) -> None:
         """
@@ -66,10 +70,12 @@ class ECGEncoder(nn.Module):
             "weights": None,  # "IMAGENET1K_V1"
             "norm_type": "batchnorm",
         },
-        emb_dim: int = 8192
+        emb_dim: int = 8192,
+        geometry_preserving: bool = False,
     ):
         super().__init__()
         self.emb_dim = emb_dim
+        self.geometry_preserving = bool(geometry_preserving)
 
         self.resnet = models.resnet18(weights=resnet_params["weights"])
         self.resnet.conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
@@ -78,7 +84,8 @@ class ECGEncoder(nn.Module):
         nn.init.kaiming_normal_(self.resnet.fc.weight, mode="fan_out")
         nn.init.zeros_(self.resnet.fc.bias)
         nn.init.kaiming_normal_(self.resnet.conv1.weight, mode="fan_out")
-        self.init_near_identity_()
+        #if self.geometry_preserving:
+        #    self.init_near_identity_()
 
     def init_near_identity_(self, noise_scale: float = 1e-3) -> None:
         """
@@ -95,17 +102,32 @@ class LabsEncoder(nn.Module):
     def __init__(
         self,
         emb_dim: int = 8192,
+        geometry_preserving: bool = False,
+        leaky_relu_negative_slope: float = 0.0,
     ):
         super().__init__()
+        self.input_dim = 100
         self.emb_dim = emb_dim
+        self.geometry_preserving = bool(geometry_preserving)
         
-        self.fc1 = nn.Linear(100, 256)
+        self.fc1 = nn.Linear(self.input_dim, 256)
         self.fc2 = nn.Linear(256, 1024)
         self.fc3 = nn.Linear(1024, emb_dim)
-        self.gelu = nn.GELU()
+        #self.act = nn.LeakyRelu(negative_slope=leaky_relu_negative_slope)
+        self.act = nn.GELU()
+
+        if self.geometry_preserving:
+            self.residual_proj = nn.Linear(self.input_dim, emb_dim)
+            self.residual_norm = nn.LayerNorm(emb_dim)
+            self.residual_drop = nn.Dropout(0.0)
+        else:
+            self.residual_proj = None
+            self.residual_norm = None
+            self.residual_drop = None
 
         self.apply(self._init_weights)
-        self.init_near_identity_()
+        if self.geometry_preserving:
+            self.init_residual_identity_()
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -120,24 +142,30 @@ class LabsEncoder(nn.Module):
             nn.init.ones_(m.weight)
             nn.init.zeros_(m.bias)
 
-    def init_near_identity_(self, noise_scale: float = 1e-3) -> None:
-        """
-        Initialize the plain labs MLP as a near-identity stack while keeping
-        the GELU activations in place.
-        """
-        _init_linear_near_identity_(self.fc1, noise_scale=noise_scale)
-        _init_linear_near_identity_(self.fc2, noise_scale=noise_scale)
-        _init_linear_near_identity_(self.fc3, noise_scale=noise_scale)
+    def init_residual_identity_(self, branch_scale: float = 1e-3) -> None:
+        if not isinstance(self.residual_proj, nn.Linear):
+            raise TypeError("LabsEncoder.residual_proj is expected to be a Linear layer.")
+
+        with torch.no_grad():
+            proj = self.residual_proj
+            proj.weight.zero_()
+            k = min(proj.out_features, proj.in_features)
+            proj.weight[:k, :k] = branch_scale * torch.eye(
+                k, device=proj.weight.device, dtype=proj.weight.dtype
+            )
+            if proj.bias is not None:
+                proj.bias.zero_()
 
     def forward(self, x):
-        # freeze all layers
-        #for param in self.parameters():
-        #    param.requires_grad = False
-        x = self.fc1(x)
-        x = self.gelu(x)
+        x_in = x
+        x = self.fc1(x_in)
+        x = self.act(x)
         x = self.fc2(x)
-        x = self.gelu(x)
+        x = self.act(x)
         x = self.fc3(x)
+        if self.geometry_preserving:
+            residual = self.residual_drop(self.residual_norm(self.residual_proj(x_in)))
+            return residual + x
         return x
 
 class CXREncoder_EF(nn.Module):
@@ -543,6 +571,7 @@ class UKBTabularEncoder(nn.Module):
         shared_adapter: nn.Module = None,
         modality_name: str = None,
         geometry_preserving: bool = False,
+        leaky_relu_negative_slope: float = 0.0,
     ):
         super().__init__()
 
@@ -564,7 +593,7 @@ class UKBTabularEncoder(nn.Module):
         prev = input_dim
         for hidden_dim, hidden_dropout in zip(hidden_dims, hidden_dropouts):
             layers.append(nn.Linear(prev, hidden_dim, bias=True))
-            layers.append(nn.LeakyReLU(0.4))  # GELU()
+            layers.append(nn.LeakyReLU(leaky_relu_negative_slope))
             layers.append(nn.LayerNorm(hidden_dim))
             layers.append(nn.Dropout(hidden_dropout))
             prev = hidden_dim
@@ -722,6 +751,216 @@ class UKBTabularEncoder_EF(nn.Module):
 
 
 """
+MIMIC (radiology reports + time-series + demographics)
+"""
+class MimicRadBERTEncoder(nn.Module):
+    def __init__(
+        self,
+        model_params: dict = {
+            "text_model_id": "StanfordAIMI/RadBERT",
+            "proj_hidden_dim": 512,
+            "dropout": 0.0,
+            "lora": False,
+        },
+        emb_dim: int = 8192,
+        geometry_preserving: bool = False,
+    ):
+        super().__init__()
+        self.emb_dim = int(emb_dim)
+        text_model_id = str(model_params.get("text_model_id", "StanfordAIMI/RadBERT"))
+        self.text_encoder = AutoModel.from_pretrained(text_model_id)
+        self.input_dim = int(self.text_encoder.config.hidden_size)
+        self.geometry_preserving = bool(geometry_preserving)
+        proj_hidden_dim = int(model_params.get("proj_hidden_dim", 512))
+        dropout = float(model_params.get("dropout", 0.0))
+
+        for p in self.text_encoder.parameters():
+            p.requires_grad = False
+        if model_params["lora"]:
+            from peft import LoraConfig, get_peft_model, TaskType
+            lora_config = LoraConfig(
+                task_type=TaskType.FEATURE_EXTRACTION,
+                r=8,
+                lora_alpha=8,
+                lora_dropout=0.1,
+                target_modules=["query", "value"],
+                bias="none",
+            )
+            self.text_encoder = get_peft_model(self.text_encoder, lora_config)
+
+        if self.geometry_preserving:
+            self.residual_proj = nn.Linear(self.input_dim, self.emb_dim)
+            self.residual_dropout = nn.Dropout(dropout)
+        else:
+            self.residual_proj = None
+            self.residual_dropout = None
+
+        self.proj = nn.Sequential(
+            nn.Linear(self.input_dim, proj_hidden_dim),
+            nn.LeakyReLU(negative_slope=0.0),
+            nn.Dropout(dropout),
+            nn.Linear(proj_hidden_dim, proj_hidden_dim),
+            nn.LeakyReLU(negative_slope=0.0),
+            nn.Dropout(dropout),
+            nn.Linear(proj_hidden_dim, self.emb_dim),
+        )
+        self.proj.apply(self._init_weights)
+        if self.geometry_preserving:
+            self.residual_proj.apply(self._init_weights)
+            self.init_residual_identity_()
+
+    def _init_weights(self, m) -> None:
+        if isinstance(m, nn.LayerNorm):
+            nn.init.ones_(m.weight)
+            nn.init.zeros_(m.bias)
+        elif isinstance(m, nn.Linear):
+            nn.init.xavier_uniform_(m.weight)
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+
+    def init_residual_identity_(self, branch_scale: float = 1e-3) -> None:
+        if not isinstance(self.residual_proj, nn.Linear):
+            raise TypeError("MimicRadBERTEncoder.residual_proj is expected to be a Linear layer.")
+
+        linears = [m for m in self.proj if isinstance(m, nn.Linear)]
+        with torch.no_grad():
+            self.residual_proj.weight.zero_()
+            k = min(self.residual_proj.out_features, self.residual_proj.in_features)
+            self.residual_proj.weight[:k, :k] = torch.eye(
+                k,
+                device=self.residual_proj.weight.device,
+                dtype=self.residual_proj.weight.dtype,
+            )
+            if self.residual_proj.bias is not None:
+                self.residual_proj.bias.zero_()
+
+            for layer in linears:
+                layer.weight.zero_()
+                if layer.bias is not None:
+                    layer.bias.zero_()
+            linears[0].weight[: min(linears[0].out_features, linears[0].in_features), : min(linears[0].out_features, linears[0].in_features)] = branch_scale * torch.eye(
+                min(linears[0].out_features, linears[0].in_features),
+                device=linears[0].weight.device,
+                dtype=linears[0].weight.dtype,
+            )
+            linears[-1].weight[: min(linears[-1].out_features, linears[-1].in_features), : min(linears[-1].out_features, linears[-1].in_features)] = branch_scale * torch.eye(
+                min(linears[-1].out_features, linears[-1].in_features),
+                device=linears[-1].weight.device,
+                dtype=linears[-1].weight.dtype,
+            )
+
+    def forward(self, x):
+        if torch.is_tensor(x):
+            pooled = x
+        elif isinstance(x, dict) and "pooled_features" in x:
+            pooled = x["pooled_features"]
+        elif isinstance(x, dict):
+            input_ids = x["input_ids"]
+            attention_mask = x["attention_mask"].to(dtype=torch.long)
+            out = self.text_encoder(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                return_dict=True,
+            ).last_hidden_state
+            weights = attention_mask.to(dtype=out.dtype).unsqueeze(-1)
+            denom = weights.sum(dim=1).clamp_min(1.0)
+            pooled = (out * weights).sum(dim=1) / denom
+        else:
+            raise TypeError(
+                "MimicRadBERTEncoder expects tokenized dict input, pooled feature dict, or pooled tensor."
+            )
+        if self.geometry_preserving:
+            return self.residual_dropout(self.residual_proj(pooled)) + self.proj(pooled)
+        return self.proj(pooled)
+
+class MimicMLPEncoder(nn.Module):
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dims: list[int] = [512, 512],
+        hidden_dropouts: list[float] = [0.1, 0.1],
+        emb_dim: int = 8192,
+        geometry_preserving: bool = False,
+        leaky_relu_negative_slope: float = 0.0,
+    ):
+        super().__init__()
+        self.input_dim = int(input_dim)
+        self.emb_dim = int(emb_dim)
+        self.geometry_preserving = bool(geometry_preserving)
+
+        layers = []
+        prev = self.input_dim
+        for hidden_dim, hidden_dropout in zip(hidden_dims, hidden_dropouts):
+            layers.append(nn.Linear(prev, hidden_dim, bias=True))
+            layers.append(nn.LeakyReLU(leaky_relu_negative_slope))
+            layers.append(nn.LayerNorm(hidden_dim))
+            layers.append(nn.Dropout(hidden_dropout))
+            prev = hidden_dim
+        layers.append(nn.Linear(prev, self.emb_dim, bias=True))
+        self.mlp = nn.Sequential(*layers)
+
+        if self.geometry_preserving:
+            self.residual_proj = nn.Linear(self.input_dim, self.emb_dim, bias=True)
+            self.residual_drop = nn.Dropout(0.0)
+            self.residual_norm = nn.LayerNorm(self.emb_dim)
+        else:
+            self.residual_proj = None
+            self.residual_drop = None
+            self.residual_norm = None
+
+        self.apply(self._init_weights)
+        if self.geometry_preserving:
+            self.init_residual_identity_()
+
+    def _init_weights(self, m):
+        if isinstance(m, nn.LayerNorm):
+            nn.init.ones_(m.weight)
+            nn.init.zeros_(m.bias)
+        elif isinstance(m, nn.Linear):
+            nn.init.kaiming_normal_(m.weight, mode="fan_out")
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+
+    def init_residual_identity_(self, branch_scale: float = 1e-3) -> None:
+        if not isinstance(self.residual_proj, nn.Linear):
+            raise TypeError("MimicMLPEncoder.residual_proj is expected to be a Linear layer.")
+        linears = [m for m in self.mlp if isinstance(m, nn.Linear)]
+        with torch.no_grad():
+            self.residual_proj.weight.zero_()
+            k = min(self.residual_proj.out_features, self.residual_proj.in_features)
+            self.residual_proj.weight[:k, :k] = torch.eye(
+                k,
+                device=self.residual_proj.weight.device,
+                dtype=self.residual_proj.weight.dtype,
+            )
+            if self.residual_proj.bias is not None:
+                self.residual_proj.bias.zero_()
+
+            for layer in linears:
+                layer.weight.zero_()
+                if layer.bias is not None:
+                    layer.bias.zero_()
+            first = linears[0]
+            last = linears[-1]
+            k_first = min(first.out_features, first.in_features)
+            k_last = min(last.out_features, last.in_features)
+            first.weight[:k_first, :k_first] = branch_scale * torch.eye(
+                k_first, device=first.weight.device, dtype=first.weight.dtype
+            )
+            last.weight[:k_last, :k_last] = branch_scale * torch.eye(
+                k_last, device=last.weight.device, dtype=last.weight.dtype
+            )
+
+    def forward(self, x):
+        if torch.isnan(x).any():
+            x = torch.nan_to_num(x, nan=0.0)
+        if self.geometry_preserving:
+            residual = self.residual_drop(self.residual_norm(self.residual_proj(x)))
+            return residual + self.mlp(x)
+        return self.mlp(x)
+
+
+"""
 Synthetic XNOR
 """
 class SyntheticXNOREncoder(nn.Module):
@@ -730,6 +969,7 @@ class SyntheticXNOREncoder(nn.Module):
         input_dim: int = 128,
         emb_dim: int = 8192,
         geometry_preserving: str = False,
+        input_layout: str = "1d",
         bounded_svd_params: dict = {
             "sv_min": 1.0,
             "sv_max": 2.0,
@@ -738,56 +978,123 @@ class SyntheticXNOREncoder(nn.Module):
         activation_fn_params: dict = {
             "leaky_relu_negative_slope": 0.01,
         },
+        sequence_encoder_params: dict = {
+            "nhead": 4,
+            "num_layers": 2,
+            "dropout": 0.0,
+            "dim_feedforward_mult": 4,
+            "residuals": True,
+            "residual_alpha": 1.0,
+            "layer_type": "transformer",
+        },
     ):
         super().__init__()
         self.input_dim = int(input_dim)
         self.emb_dim = emb_dim
         self.geometry_preserving = geometry_preserving
+        self.input_layout = str(input_layout)
 
-        from utils import InvertibleTabularAdapter
         self.input_proj = nn.Linear(input_dim, emb_dim)
-        self.adapter = InvertibleTabularAdapter(
-            dim=emb_dim,
-            num_blocks=2,
-            hidden_dim=emb_dim,
-            dropout=0.0,
-            alpha_init=1e-2,
-        )
 
         if self.geometry_preserving == "residual":
             self.residual_proj = nn.Linear(input_dim, emb_dim)
-
-        if self.geometry_preserving in {"near_isometric", "orthogonal"}:
-            from utils import NearIsometricLinear
-            linear_cls = NearIsometricLinear
-        elif self.geometry_preserving == "bounded_svd_linear":
+        if self.geometry_preserving == "bounded_svd_linear":
             from utils import BoundedSVDLinear
             linear_cls = BoundedSVDLinear
-        else:
-            linear_cls = nn.Linear
 
-        self.mlp = nn.Sequential(
-            linear_cls(input_dim, emb_dim),  # , **bounded_svd_params
-            nn.LeakyReLU(activation_fn_params["leaky_relu_negative_slope"]),  # ReLU
-            linear_cls(emb_dim, emb_dim),  # , **bounded_svd_params
-            nn.LeakyReLU(activation_fn_params["leaky_relu_negative_slope"]),  # ReLU
-            linear_cls(emb_dim, emb_dim)  # , **bounded_svd_params
-        )
-        self.apply(self._init_weights)
-        if self.geometry_preserving == "spectral":
-            import torch.nn.utils.parametrizations as P
-            for idx, layer in enumerate(self.mlp):
-                if isinstance(layer, nn.Linear):
-                    self.mlp[idx] = P.spectral_norm(layer)
-        if self.geometry_preserving == "orthogonal":
-            import torch.nn.utils.parametrizations as P
-            for idx, layer in enumerate(self.mlp):
-                if isinstance(layer, nn.Linear):
-                    self.mlp[idx] = P.orthogonal(layer)
+        if self.input_layout == "1d":
+            self.mlp = nn.Sequential(
+                nn.Linear(input_dim, emb_dim),  # , **bounded_svd_params
+                nn.LeakyReLU(activation_fn_params["leaky_relu_negative_slope"]),  # ReLU
+                #nn.ReLU(),
+                #nn.Identity(),
+                nn.Linear(emb_dim, emb_dim),  # , **bounded_svd_params
+                nn.LeakyReLU(activation_fn_params["leaky_relu_negative_slope"]),  # ReLU
+                #nn.ReLU(),
+                #nn.Identity(),
+                nn.Linear(emb_dim, emb_dim)  # , **bounded_svd_params
+            )
+            self.apply(self._init_weights)
+        elif self.input_layout == "2d":
+            nhead = sequence_encoder_params["nhead"]
+            num_layers = sequence_encoder_params["num_layers"]
+            dropout = 0.0
+            ff_mult = sequence_encoder_params["dim_feedforward_mult"]
+            seq_len = sequence_encoder_params["seq_len"]
+            residuals_enabled = bool(sequence_encoder_params.get("residuals", True))
+            residual_alpha = float(sequence_encoder_params.get("residual_alpha", 1.0))
+            layer_type = str(sequence_encoder_params.get("layer_type", "transformer"))
+            self.seq_len = seq_len
 
-        if self.geometry_preserving == "identity_init":
-            self.init_near_identity_(noise_scale=1e-3)
-        elif self.geometry_preserving == "residual":
+            self.pos_embed = nn.Parameter(torch.zeros(1, seq_len, emb_dim))
+            nn.init.normal_(self.pos_embed, std=0.02)
+
+            self.seq_input_proj = nn.Linear(self.input_dim, self.emb_dim)
+            if layer_type == "transformer":
+                if residuals_enabled:
+                    from utils import ScaledResidualTransformerEncoderLayer
+                    encoder_layer = ScaledResidualTransformerEncoderLayer(
+                        d_model=self.emb_dim,
+                        nhead=nhead,
+                        dim_feedforward=max(self.emb_dim, ff_mult * self.emb_dim),
+                        dropout=dropout,
+                        batch_first=True,
+                        norm_first=True,
+                        activation="relu",
+                        residual_alpha=residual_alpha,
+                    )
+                else:
+                    from utils import NoResidualTransformerEncoderLayer
+                    encoder_layer = NoResidualTransformerEncoderLayer(
+                        d_model=self.emb_dim,
+                        nhead=nhead,
+                        dim_feedforward=max(self.emb_dim, ff_mult * self.emb_dim),
+                        dropout=dropout,
+                        batch_first=True,
+                        norm_first=True,
+                        activation="relu",
+                    )
+            elif layer_type == "tokenwise_mlp":
+                from utils import TokenwiseMLPEncoderLayer
+                encoder_layer = TokenwiseMLPEncoderLayer(
+                    d_model=self.emb_dim,
+                    nhead=nhead,
+                    dim_feedforward=max(self.emb_dim, ff_mult * self.emb_dim),
+                    dropout=dropout,
+                    batch_first=True,
+                    norm_first=True,
+                    activation="relu",
+                )
+            elif layer_type == "uniform_attention":
+                from utils import UniformAttentionEncoderLayer
+                encoder_layer = UniformAttentionEncoderLayer(
+                    d_model=self.emb_dim,
+                    nhead=nhead,
+                    dim_feedforward=max(self.emb_dim, ff_mult * self.emb_dim),
+                    dropout=dropout,
+                    batch_first=True,
+                    norm_first=True,
+                    activation="relu",
+                )
+            else:
+                raise ValueError(
+                    f"Unknown sequence_encoder_params.layer_type: {layer_type}. "
+                    "Expected one of ['transformer', 'tokenwise_mlp', 'uniform_attention']."
+                )
+
+            self.seq_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+            self.seq_out_proj = nn.Linear(self.emb_dim, self.emb_dim)
+
+            self.apply(self._init_weights)
+
+            #for layer in self.seq_encoder.layers:
+            #    layer.self_attn.out_proj.weight.data.mul_(1e-3)
+            #    layer.self_attn.out_proj.bias.data.zero_()
+            #    layer.linear2.weight.data.mul_(1e-3)
+            #    layer.linear2.bias.data.zero_()
+
+        #self.apply_burkholz_relu_init(self.mlp, mode="orthogonal")
+        if self.geometry_preserving == "residual":
             self.init_residual_identity_()
     
     def _init_weights(
@@ -888,8 +1195,6 @@ class SyntheticXNOREncoder(nn.Module):
         """
         if not isinstance(self.residual_proj, nn.Linear):
             raise TypeError("SyntheticXNOREncoder.residual_proj is expected to be a Linear layer.")
-        if not isinstance(self.mlp[0], nn.Linear) or not isinstance(self.mlp[2], nn.Linear) or not isinstance(self.mlp[4], nn.Linear):
-            raise TypeError("SyntheticXNOREncoder.mlp does not have the expected Linear/Act/Linear/Act/Linear structure.")
 
         with torch.no_grad():
             proj = self.residual_proj
@@ -899,33 +1204,71 @@ class SyntheticXNOREncoder(nn.Module):
             if proj.bias is not None:
                 proj.bias.zero_()
 
-            for idx in (0, 2, 4):
-                layer = self.mlp[idx]
-                layer.weight.zero_()
-                if layer.bias is not None:
-                    layer.bias.zero_()
+            if self.input_layout == "1d":
+                if not isinstance(self.mlp[0], nn.Linear) or not isinstance(self.mlp[2], nn.Linear) or not isinstance(self.mlp[4], nn.Linear):
+                    raise TypeError("SyntheticXNOREncoder.mlp does not have the expected Linear/Act/Linear/Act/Linear structure.")
 
-            # Keep a tiny non-zero branch so gradients can start shaping it,
-            # while the residual path dominates at initialization.
-            first = self.mlp[0]
-            last = self.mlp[4]
-            k_first = min(first.out_features, first.in_features)
-            k_last = min(last.out_features, last.in_features)
-            first.weight[:k_first, :k_first] = branch_scale * torch.eye(
-                k_first, device=first.weight.device, dtype=first.weight.dtype
-            )
-            last.weight[:k_last, :k_last] = branch_scale * torch.eye(
-                k_last, device=last.weight.device, dtype=last.weight.dtype
-            )
+                for idx in (0, 2, 4):
+                    layer = self.mlp[idx]
+                    layer.weight.zero_()
+                    if layer.bias is not None:
+                        layer.bias.zero_()
+
+                # Keep a tiny non-zero branch so gradients can start shaping it,
+                # while the residual path dominates at initialization.
+                first = self.mlp[0]
+                last = self.mlp[4]
+                k_first = min(first.out_features, first.in_features)
+                k_last = min(last.out_features, last.in_features)
+                first.weight[:k_first, :k_first] = branch_scale * torch.eye(
+                    k_first, device=first.weight.device, dtype=first.weight.dtype
+                )
+                last.weight[:k_last, :k_last] = branch_scale * torch.eye(
+                    k_last, device=last.weight.device, dtype=last.weight.dtype
+                )
+            elif self.input_layout == "2d":
+                # Keep transformer branch near zero at initialization while
+                # residual path carries identity-like mapping.
+                self.seq_input_proj.weight.zero_()
+                k_seq = min(self.seq_input_proj.out_features, self.seq_input_proj.in_features)
+                self.seq_input_proj.weight[:k_seq, :k_seq] = branch_scale * torch.eye(
+                    k_seq,
+                    device=self.seq_input_proj.weight.device,
+                    dtype=self.seq_input_proj.weight.dtype,
+                )
+                if self.seq_input_proj.bias is not None:
+                    self.seq_input_proj.bias.zero_()
+            else:
+                raise ValueError(f"Unknown input_layout: {self.input_layout}")
+
+    def apply_burkholz_relu_init(self, model: nn.Module, mode: str = "orthogonal"):
+        from utils import burkholz_relu_init_linear
+        for m in model.modules():
+            if isinstance(m, nn.Linear):
+                burkholz_relu_init_linear(m, mode=mode)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self.geometry_preserving == "residual":
-            residual = self.residual_proj(x)
-            return residual + self.mlp(x)
-        return self.mlp(x)
-        #x = self.input_proj(x)
-        #x = self.adapter(x)
-        #return x
+        if self.input_layout == "1d":
+            z = self.mlp(x)
+            if self.geometry_preserving == "residual":
+                residual = self.residual_proj(x)
+                return residual + z
+            return z
+        elif self.input_layout == "2d":
+            z_tokens = self.seq_input_proj(x)
+            z_tokens = z_tokens + self.pos_embed
+
+            if self.geometry_preserving == "residual":
+                residual = self.residual_proj(x)
+                if residual.ndim == 2:
+                    residual = residual.unsqueeze(1)
+                z_tokens = z_tokens + residual
+
+            z_tokens = self.seq_encoder(z_tokens)
+            z = self.seq_out_proj(z_tokens.mean(dim=1))
+            return z
+        else:
+            raise ValueError(f"Unknown input_layout: {self.input_layout}")
 
 
 class SyntheticXNOREncoder_Res(nn.Module):
@@ -1049,67 +1392,55 @@ class MCMEDWaveformEncoder(nn.Module):
         self,
         input_length: int = 5000,
         emb_dim: int = 8192,
-        conv_channels: list[int] = [32, 64, 128],
-        kernel_sizes: list[int] = [15, 9, 5],
-        strides: list[int] = [2, 2, 2],
         d_model: int = 256,
-        nhead: int = 8,
-        num_layers: int = 2,
+        num_blocks: int = 3,
+        kernel_size: int = 7,
+        downsample_stride: int = 2,
+        num_input_proj_layers: int = 2,
+        input_proj_leaky_relu_negative_slope: float = 0.0,
         dropout: float = 0.1,
-        stem_kernel_sizes: tuple[int, ...] = (5, 5),
-        stem_strides: tuple[int, ...] = (2, 2),
     ):
         super().__init__()
-        if not (len(conv_channels) == len(kernel_sizes) == len(strides)):
-            raise ValueError("conv_channels, kernel_sizes, and strides must have the same length.")
-        if len(stem_kernel_sizes) != len(stem_strides):
-            raise ValueError("stem_kernel_sizes and stem_strides must have the same length.")
-
         self.input_length = int(input_length)
         self.emb_dim = int(emb_dim)
         self.d_model = int(d_model)
+        self.downsample_stride = int(downsample_stride)
+        self.num_input_proj_layers = int(num_input_proj_layers)
+        self.input_proj_leaky_relu_negative_slope = float(input_proj_leaky_relu_negative_slope)
 
-        conv_blocks = []
-        in_channels = 1
-        for out_channels, kernel_size, stride in zip(conv_channels, kernel_sizes, strides):
-            padding = kernel_size // 2
-            conv_blocks.extend([
-                nn.Conv1d(in_channels, out_channels, kernel_size=kernel_size, stride=stride, padding=padding),
-                nn.BatchNorm1d(out_channels),
-                nn.GELU(),
-            ])
-            in_channels = out_channels
-        self.cnn = nn.Sequential(*conv_blocks)
-        self.window_pool = nn.AdaptiveAvgPool1d(1)
-        self.window_proj = nn.Linear(in_channels, d_model)
-        temporal_stem_layers = []
-        for kernel_size, stride in zip(stem_kernel_sizes, stem_strides):
-            padding = int(kernel_size) // 2
-            temporal_stem_layers.extend([
-                nn.Conv1d(d_model, d_model, kernel_size=int(kernel_size), stride=int(stride), padding=padding),
-                nn.BatchNorm1d(d_model),
-                nn.GELU(),
-            ])
-        self.temporal_stem = nn.Sequential(*temporal_stem_layers) if temporal_stem_layers else nn.Identity()
-        self.stem_kernel_sizes = [int(k) for k in stem_kernel_sizes]
-        self.stem_strides = [int(s) for s in stem_strides]
-
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, d_model))
-        self.pos_embed = nn.Parameter(torch.zeros(1, 512, d_model))
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_model,
-            nhead=nhead,
-            dim_feedforward=d_model * 4,
-            dropout=dropout,
-            activation="gelu",
-            batch_first=True,
-            norm_first=True,
+        stem_kernel = 7
+        stem_padding = stem_kernel // 2
+        stem_layers = []
+        in_channels = 2
+        for _ in range(self.num_input_proj_layers):
+            stem_layers.append(
+                nn.Conv1d(
+                    in_channels,
+                    self.d_model,
+                    kernel_size=stem_kernel,
+                    stride=self.downsample_stride,
+                    padding=stem_padding,
+                )
+            )
+            stem_layers.append(nn.BatchNorm1d(self.d_model))
+            stem_layers.append(nn.LeakyReLU(negative_slope=self.input_proj_leaky_relu_negative_slope))
+            in_channels = self.d_model
+        self.input_proj = nn.Sequential(*stem_layers)
+        self.resnet = nn.Sequential(
+            *[
+                _MCMEDResBlock1D(
+                    channels=self.d_model,
+                    kernel_size=int(kernel_size),
+                    dropout=float(dropout),
+                )
+                for _ in range(int(num_blocks))
+            ]
         )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-
-        self.proj = nn.Linear(d_model, emb_dim)
+        self.window_pool = nn.AdaptiveAvgPool1d(1)
+        self.proj = nn.Linear(self.d_model, emb_dim)
 
         self.apply(self._init_weights)
+        self.init_resnet_identity_()
 
     def _init_weights(self, m) -> None:
         if isinstance(m, nn.LayerNorm):
@@ -1127,142 +1458,333 @@ class MCMEDWaveformEncoder(nn.Module):
             nn.init.ones_(m.weight)
             nn.init.zeros_(m.bias)
 
-    def _build_key_padding_mask(
-        self,
-        batch_size: int,
-        num_windows: int,
-        lengths,
-        device,
-        valid_mask: torch.Tensor = None,
-    ) -> torch.Tensor:
-        if valid_mask is not None:
-            window_mask = ~valid_mask.to(device=device, dtype=torch.bool)
-        elif lengths is not None:
-            lengths = lengths.to(device=device)
-            window_mask = torch.arange(num_windows, device=device).unsqueeze(0) >= lengths.unsqueeze(1)
-        else:
-            window_mask = torch.zeros(batch_size, num_windows, dtype=torch.bool, device=device)
-        cls_mask = torch.zeros(batch_size, 1, dtype=torch.bool, device=device)
-        return torch.cat([cls_mask, window_mask], dim=1)
-
-    def _add_positional_embeddings(self, x: torch.Tensor) -> torch.Tensor:
-        seq_len = x.size(1)
-        if seq_len > self.pos_embed.size(1):
-            extra = seq_len - self.pos_embed.size(1)
-            last_pos = self.pos_embed[:, -1:, :].expand(1, extra, -1)
-            pos_embed = torch.cat([self.pos_embed, last_pos], dim=1)
-        else:
-            pos_embed = self.pos_embed
-        return x + pos_embed[:, :seq_len]
-
-    def _downsample_lengths(self, lengths: torch.Tensor) -> torch.Tensor:
-        out = lengths.to(dtype=torch.long)
-        for kernel_size, stride in zip(self.stem_kernel_sizes, self.stem_strides):
-            padding = kernel_size // 2
-            out = ((out + 2 * padding - kernel_size) // stride) + 1
-            out = torch.clamp(out, min=0)
-        return out
-
-    def _downsample_valid_mask(self, valid_mask: torch.Tensor) -> torch.Tensor:
-        out = valid_mask.to(dtype=torch.float32).unsqueeze(1)
-        for kernel_size, stride in zip(self.stem_kernel_sizes, self.stem_strides):
-            padding = kernel_size // 2
-            out = F.max_pool1d(out, kernel_size=kernel_size, stride=stride, padding=padding)
-        return out.squeeze(1) > 0.5
+    def init_resnet_identity_(self) -> None:
+        """
+        Initialize residual branches inside each 1D ResBlock near zero so the
+        skip path dominates at initialization.
+        """
+        with torch.no_grad():
+            for block in self.resnet:
+                if not isinstance(block, _MCMEDResBlock1D):
+                    continue
+                block.conv2.weight.zero_()
+                if block.conv2.bias is not None:
+                    block.conv2.bias.zero_()
+                block.bn2.weight.zero_()
+                block.bn2.bias.zero_()
 
     def forward(self, x):
-        lengths = None
-        valid_mask = None
-        if isinstance(x, dict):
-            lengths = x.get("lengths")
-            valid_mask = x.get("bin_mask")
-            x = x["windows"]
-
-        if x.ndim != 4:
-            raise ValueError(f"Expected waveform input with shape [B, N, {self.input_length}, 1], got {tuple(x.shape)}")
-
-        batch_size, num_windows, signal_len, num_channels = x.shape
-        if signal_len != self.input_length or num_channels != 1:
-            raise ValueError(
-                f"Expected waveform input with shape [B, N, {self.input_length}, 1], got {tuple(x.shape)}"
-            )
+        windows = x["windows"]  # [B, N, L, 1]
+        batch_size, num_windows, signal_len, num_channels = windows.shape
 
         if num_windows == 0:
-            x = self.window_proj.weight.new_empty((batch_size, 0, self.d_model))
-        else:
-            x = torch.nan_to_num(x, nan=0.0).reshape(batch_size * num_windows, signal_len, num_channels)
-            x = x.transpose(1, 2)
-            x = self.cnn(x)
-            x = self.window_pool(x).squeeze(-1)
-            x = self.window_proj(x).view(batch_size, num_windows, self.d_model)
-            x = x.transpose(1, 2)
-            x = self.temporal_stem(x)
-            x = x.transpose(1, 2)
-            num_windows = x.shape[1]
-            if valid_mask is not None:
-                valid_mask = self._downsample_valid_mask(valid_mask.to(device=x.device))
-            elif lengths is not None:
-                lengths = self._downsample_lengths(lengths.to(device=x.device))
+            pooled = self.proj.weight.new_zeros((batch_size, self.d_model))
+            return self.proj(pooled)
 
-        cls_token = self.cls_token.expand(batch_size, -1, -1)
-        x = torch.cat([cls_token, x], dim=1)
-        x = self._add_positional_embeddings(x)
+        # valid window if at least one observed sample exists in the window.
+        window_valid = ~torch.isnan(windows).reshape(batch_size, num_windows, -1).all(dim=-1)  # [B, N]
+        nan_mask = torch.isnan(windows).to(dtype=windows.dtype)
+        packed = torch.cat([torch.nan_to_num(windows, nan=0.0), nan_mask], dim=-1)  # [B, N, L, 2]
 
-        key_padding_mask = self._build_key_padding_mask(
-            batch_size,
-            num_windows,
-            lengths,
-            x.device,
-            valid_mask=valid_mask,
-        )
-        x = self.transformer(x, src_key_padding_mask=key_padding_mask)
-        x = self.proj(x[:, 0])
-        return x
+        x = packed.reshape(batch_size * num_windows, signal_len, 2).transpose(1, 2)  # [B*N, 2, L]
+        x = self.input_proj(x)
+        x = self.resnet(x)
+        x = self.window_pool(x).squeeze(-1).view(batch_size, num_windows, self.d_model)  # [B, N, D]
 
+        weights = window_valid.to(device=x.device, dtype=x.dtype).unsqueeze(-1)
+        denom = weights.sum(dim=1).clamp_min(1.0)
+        pooled = (x * weights).sum(dim=1) / denom
+        return self.proj(pooled)
 
 class MCMEDRadiologyEncoder(nn.Module):
     def __init__(
         self,
         model_params: dict = {
-            "text_model_id": "bert-base-uncased",
-            "max_length": 256,
-            "use_pretrain_bert": True,
-            "cache_dir": "/sc-projects/sc-proj-ukb-cvd/projects/data/tmp_hf_cache",
-            "local_files_only": False,
+            "text_model_id": "StanfordAIMI/RadBERT",
+            "proj_hidden_dim": 512,
+            "dropout": 0.0,
         },
         emb_dim: int = 8192,
+        geometry_preserving: bool = False,
     ):
         super().__init__()
         self.emb_dim = int(emb_dim)
-        self.text_model_id = model_params["text_model_id"]
-        self.max_length = int(model_params.get("max_length", 256))
-        self.use_pretrain_bert = bool(model_params.get("use_pretrain_bert", True))
-        self.freeze_pretrained_bert = bool(model_params.get("freeze_pretrained_bert", self.use_pretrain_bert))
-        self.cache_dir = model_params.get("cache_dir", None)
-        self.local_files_only = bool(model_params.get("local_files_only", False))
+        text_model_id = str(model_params.get("text_model_id", "StanfordAIMI/RadBERT"))
+        self.text_encoder = AutoModel.from_pretrained(text_model_id)
+        self.input_dim = int(self.text_encoder.config.hidden_size)
+        self.geometry_preserving = bool(geometry_preserving)
+        proj_hidden_dim = int(model_params.get("proj_hidden_dim", 512))
+        dropout = float(model_params.get("dropout", 0.0))
+        for p in self.text_encoder.parameters():
+            p.requires_grad = True
 
-        if self.use_pretrain_bert:
-            self.encoder = BertModel.from_pretrained(
-                self.text_model_id,
-                cache_dir=self.cache_dir,
-                local_files_only=self.local_files_only,
-            )
+        if self.geometry_preserving:
+            self.residual_proj = nn.Linear(self.input_dim, emb_dim)
+            self.residual_dropout = nn.Dropout(dropout)
         else:
-            self.encoder = BertModel(BertConfig())
-
-        if self.freeze_pretrained_bert:
-            self.encoder.requires_grad_(False)
-            self.encoder.eval()
-
-        hidden_size = int(self.encoder.config.hidden_size)
-        proj_hidden_dim = int(model_params.get("proj_hidden_dim", hidden_size))
+            self.residual_proj = None
+            self.residual_dropout = None
         self.proj = nn.Sequential(
-            nn.LayerNorm(hidden_size),
-            nn.Linear(hidden_size, proj_hidden_dim),
-            nn.GELU(),
+            nn.Linear(self.input_dim, proj_hidden_dim),
+            nn.LeakyReLU(negative_slope=0.4),
+            nn.Dropout(dropout),
+            nn.Linear(proj_hidden_dim, proj_hidden_dim),
+            nn.LeakyReLU(negative_slope=0.4),
+            nn.Dropout(dropout),
             nn.Linear(proj_hidden_dim, emb_dim),
         )
         self.proj.apply(self._init_weights)
+        if self.geometry_preserving:
+            self.residual_proj.apply(self._init_weights)
+            self.init_residual_identity_()
+
+        for p in self.text_encoder.parameters():
+            p.requires_grad = False
+
+    def _init_weights(self, m) -> None:
+        if isinstance(m, nn.LayerNorm):
+            nn.init.ones_(m.weight)
+            nn.init.zeros_(m.bias)
+        elif isinstance(m, nn.Linear):
+            nn.init.xavier_uniform_(m.weight)
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+
+    def init_residual_identity_(self, branch_scale: float = 1e-3) -> None:
+        if not isinstance(self.residual_proj, nn.Linear):
+            raise TypeError("MCMEDRadiologyEncoder.residual_proj is expected to be a Linear layer.")
+
+        linears = [m for m in self.proj if isinstance(m, nn.Linear)]
+        if len(linears) == 0:
+            raise TypeError("MCMEDRadiologyEncoder.proj does not contain any Linear layers.")
+
+        with torch.no_grad():
+            self.residual_proj.weight.zero_()
+            k = min(self.residual_proj.out_features, self.residual_proj.in_features)
+            self.residual_proj.weight[:k, :k] = torch.eye(
+                k,
+                device=self.residual_proj.weight.device,
+                dtype=self.residual_proj.weight.dtype,
+            )
+            if self.residual_proj.bias is not None:
+                self.residual_proj.bias.zero_()
+
+            for layer in linears:
+                layer.weight.zero_()
+                if layer.bias is not None:
+                    layer.bias.zero_()
+
+            first = linears[0]
+            last = linears[-1]
+            k_first = min(first.out_features, first.in_features)
+            k_last = min(last.out_features, last.in_features)
+            first.weight[:k_first, :k_first] = branch_scale * torch.eye(
+                k_first,
+                device=first.weight.device,
+                dtype=first.weight.dtype,
+            )
+            last.weight[:k_last, :k_last] = branch_scale * torch.eye(
+                k_last,
+                device=last.weight.device,
+                dtype=last.weight.dtype,
+            )
+
+    def forward(self, x):
+        if not isinstance(x, dict):
+            raise TypeError("MCMEDRadiologyEncoder expects dict input with tokenized radiology tensors.")
+
+        input_ids = x["input_ids"]  # [B, R, L]
+        attention_mask = x["attention_mask"]  # [B, R, L]
+        report_mask = x["report_mask"]  # [B, R]
+
+        batch_size, num_reports, seq_len = input_ids.shape
+        if num_reports == 0:
+            return self.proj[-1].weight.new_zeros((batch_size, self.emb_dim))
+
+        flat_input_ids = input_ids.reshape(batch_size * num_reports, seq_len)
+        flat_attention = attention_mask.reshape(batch_size * num_reports, seq_len).to(dtype=torch.long)
+        bert_out = self.text_encoder(
+            input_ids=flat_input_ids,
+            attention_mask=flat_attention,
+            return_dict=True,
+        ).last_hidden_state  # [B*R, L, H]
+
+        token_weights = flat_attention.to(dtype=bert_out.dtype).unsqueeze(-1)
+        token_denom = token_weights.sum(dim=1).clamp_min(1.0)
+        report_embeddings = (bert_out * token_weights).sum(dim=1) / token_denom  # [B*R, H]
+        report_embeddings = report_embeddings.view(batch_size, num_reports, self.input_dim)
+
+        if self.geometry_preserving:
+            x = self.residual_dropout(self.residual_proj(report_embeddings)) + self.proj(report_embeddings)
+        else:
+            x = self.proj(report_embeddings)
+
+        weights = report_mask.to(device=x.device, dtype=x.dtype).unsqueeze(-1)
+        denom = weights.sum(dim=1).clamp_min(1.0)
+        return (x * weights).sum(dim=1) / denom
+
+class MCMEDClinicalEncoder(nn.Module):
+    def __init__(
+        self,
+        model_params: dict = None,
+        emb_dim: int = 8192,
+        geometry_preserving: bool = False,
+    ):
+        super().__init__()
+        if model_params is None:
+            model_params = {
+                "text_model_id": "emilyalsentzer/Bio_ClinicalBERT",
+                "proj_hidden_dim": 512,
+                "dropout": 0.0,
+            }
+
+        self.emb_dim = int(emb_dim)
+        text_model_id = str(model_params.get("text_model_id", "emilyalsentzer/Bio_ClinicalBERT"))
+        self.text_encoder = AutoModel.from_pretrained(text_model_id)
+        self.input_dim = int(self.text_encoder.config.hidden_size)
+        self.geometry_preserving = bool(geometry_preserving)
+        proj_hidden_dim = int(model_params.get("proj_hidden_dim", 512))
+        dropout = float(model_params.get("dropout", 0.0))
+        for p in self.text_encoder.parameters():
+            p.requires_grad = True
+
+        if self.geometry_preserving:
+            self.residual_proj = nn.Linear(self.input_dim, self.emb_dim)
+            self.residual_dropout = nn.Dropout(dropout)
+        else:
+            self.residual_proj = None
+            self.residual_dropout = None
+        self.proj = nn.Sequential(
+            nn.Linear(self.input_dim, proj_hidden_dim),
+            nn.LeakyReLU(negative_slope=0.4),
+            nn.Dropout(dropout),
+            nn.Linear(proj_hidden_dim, proj_hidden_dim),
+            nn.LeakyReLU(negative_slope=0.4),
+            nn.Dropout(dropout),
+            nn.Linear(proj_hidden_dim, self.emb_dim),
+        )
+        self.proj.apply(self._init_weights)
+        if self.geometry_preserving:
+            self.residual_proj.apply(self._init_weights)
+            self.init_residual_identity_()
+
+        for p in self.text_encoder.parameters():
+            p.requires_grad = False
+
+    def _init_weights(self, m) -> None:
+        if isinstance(m, nn.LayerNorm):
+            nn.init.ones_(m.weight)
+            nn.init.zeros_(m.bias)
+        elif isinstance(m, nn.Linear):
+            nn.init.xavier_uniform_(m.weight)
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+
+    def init_residual_identity_(self, branch_scale: float = 1e-3) -> None:
+        if not isinstance(self.residual_proj, nn.Linear):
+            raise TypeError("MCMEDClinicalEncoder.residual_proj is expected to be a Linear layer.")
+
+        linears = [m for m in self.proj if isinstance(m, nn.Linear)]
+        if len(linears) == 0:
+            raise TypeError("MCMEDClinicalEncoder.proj does not contain any Linear layers.")
+
+        with torch.no_grad():
+            self.residual_proj.weight.zero_()
+            k = min(self.residual_proj.out_features, self.residual_proj.in_features)
+            self.residual_proj.weight[:k, :k] = torch.eye(
+                k,
+                device=self.residual_proj.weight.device,
+                dtype=self.residual_proj.weight.dtype,
+            )
+            if self.residual_proj.bias is not None:
+                self.residual_proj.bias.zero_()
+
+            for layer in linears:
+                layer.weight.zero_()
+                if layer.bias is not None:
+                    layer.bias.zero_()
+
+            first = linears[0]
+            last = linears[-1]
+            k_first = min(first.out_features, first.in_features)
+            k_last = min(last.out_features, last.in_features)
+            first.weight[:k_first, :k_first] = branch_scale * torch.eye(
+                k_first,
+                device=first.weight.device,
+                dtype=first.weight.dtype,
+            )
+            last.weight[:k_last, :k_last] = branch_scale * torch.eye(
+                k_last,
+                device=last.weight.device,
+                dtype=last.weight.dtype,
+            )
+
+    def forward(self, x):
+        if not isinstance(x, dict):
+            raise TypeError("MCMEDClinicalEncoder expects dict input with tokenized clinical tensors.")
+
+        input_ids = x["input_ids"]  # [B, E, L]
+        attention_mask = x["attention_mask"]  # [B, E, L]
+        event_mask = x["event_mask"]  # [B, E]
+
+        batch_size, num_events, seq_len = input_ids.shape
+        if num_events == 0:
+            return self.proj[-1].weight.new_zeros((batch_size, self.emb_dim))
+
+        flat_input_ids = input_ids.reshape(batch_size * num_events, seq_len)
+        flat_attention = attention_mask.reshape(batch_size * num_events, seq_len).to(dtype=torch.long)
+        bert_out = self.text_encoder(
+            input_ids=flat_input_ids,
+            attention_mask=flat_attention,
+            return_dict=True,
+        ).last_hidden_state  # [B*E, L, H]
+
+        token_weights = flat_attention.to(dtype=bert_out.dtype).unsqueeze(-1)
+        token_denom = token_weights.sum(dim=1).clamp_min(1.0)
+        event_embeddings = (bert_out * token_weights).sum(dim=1) / token_denom  # [B*E, H]
+        event_embeddings = event_embeddings.view(batch_size, num_events, self.input_dim)
+
+        if self.geometry_preserving:
+            x = self.residual_dropout(self.residual_proj(event_embeddings)) + self.proj(event_embeddings)
+        else:
+            x = self.proj(event_embeddings)
+
+        weights = event_mask.to(device=x.device, dtype=x.dtype).unsqueeze(-1)
+        denom = weights.sum(dim=1).clamp_min(1.0)
+        pooled = (x * weights).sum(dim=1) / denom
+        return pooled
+
+
+class MCMEDDemographicsEncoder(nn.Module):
+    def __init__(
+        self,
+        model_params: dict = {
+            "proj_hidden_dim": 512,
+            "dropout": 0.0,
+        },
+        emb_dim: int = 8192,
+        geometry_preserving: bool = False,
+    ):
+        super().__init__()
+        self.emb_dim = int(emb_dim)
+        self.geometry_preserving = bool(geometry_preserving)
+        self.proj_hidden_dim = int(model_params.get("proj_hidden_dim", 512))
+        self.dropout = float(model_params.get("dropout", 0.0))
+        self.input_dim = int(model_params.get("input_dim", 12))
+        self.proj = nn.Sequential(
+            nn.Linear(self.input_dim, self.proj_hidden_dim),
+            nn.LeakyReLU(negative_slope=0.4),
+            nn.Dropout(self.dropout),
+            nn.Linear(self.proj_hidden_dim, self.proj_hidden_dim),
+            nn.LeakyReLU(negative_slope=0.4),
+            nn.Dropout(self.dropout),
+            nn.Linear(self.proj_hidden_dim, self.emb_dim),
+        )
+        self.proj.apply(self._init_weights)
+        if self.geometry_preserving:
+            self.residual_proj = nn.Linear(self.input_dim, self.emb_dim)
+            self.residual_dropout = nn.Dropout(self.dropout)
+            self.residual_proj.apply(self._init_weights)
 
     def _init_weights(self, m) -> None:
         if isinstance(m, nn.LayerNorm):
@@ -1274,84 +1796,61 @@ class MCMEDRadiologyEncoder(nn.Module):
                 nn.init.zeros_(m.bias)
 
     def forward(self, x):
-        if not isinstance(x, dict):
-            raise TypeError("MCMEDRadiologyEncoder expects a tokenized dict with 'input_ids' and 'attention_mask'.")
+        cont = x["continuous"].to(dtype=torch.float32)  # [B, Dc]
+        cont_mask = x["continuous_mask"].to(dtype=torch.bool)  # [B, Dc]
+        cat = x["categorical"].to(dtype=torch.float32)  # [B, Dk]
+        cat_mask = x["categorical_mask"].to(dtype=torch.bool)  # [B, Dk]
 
-        device = self.proj[1].weight.device
-        tokenized = {k: v.to(device) for k, v in x.items()}
+        cont_filled = torch.where(cont_mask, cont, torch.zeros_like(cont))
+        cat_filled = torch.where(cat_mask, cat, torch.zeros_like(cat))
+        features = torch.cat(
+            [
+                cont_filled,
+                cont_mask.to(dtype=cont.dtype),
+                cat_filled,
+                cat_mask.to(dtype=cat.dtype),
+            ],
+            dim=-1,
+        )  # [B, 2 * (Dc + Dk)]
 
-        if self.freeze_pretrained_bert:
-            self.encoder.eval()
-            with torch.no_grad():
-                outputs = self.encoder(**tokenized)
-        else:
-            outputs = self.encoder(**tokenized)
-        cls_embedding = outputs.last_hidden_state[:, 0]
-        x = self.proj(cls_embedding)
-        return x
-
+        if self.geometry_preserving:
+            return self.residual_dropout(self.residual_proj(features)) + self.proj(features)
+        return self.proj(features)
 
 class MCMEDNumericsEncoder(nn.Module):
     def __init__(
         self,
         input_dim: int = 12,
         emb_dim: int = 8192,
-        d_model: int = 8192,
-        nhead: int = 8,
-        num_layers: int = 2,
-        dropout: float = 0.1,
-        max_seq_len: int = 2048,
-        stem_kernel_sizes: tuple[int, ...] = (5, 5, 5),
-        stem_strides: tuple[int, ...] = (2, 2, 2),
         trend_feature_dim: int = 7,
+        d_model: int = 256,
+        num_blocks: int = 3,
+        kernel_size: int = 3,
+        dropout: float = 0.1,
     ):
         super().__init__()
         self.input_dim = int(input_dim)
-        self.emb_dim = int(emb_dim)
-        self.d_model = int(d_model)
         self.trend_feature_dim = int(trend_feature_dim)
+        self.d_model = int(d_model)
 
-        if len(stem_kernel_sizes) != len(stem_strides):
-            raise ValueError("stem_kernel_sizes and stem_strides must have the same length.")
-
-        self.raw_input_proj = nn.Linear(self.input_dim * 2, d_model)
-        self.trend_input_proj = nn.Linear(
-            (self.input_dim * self.trend_feature_dim) + self.input_dim + 1,
-            d_model,
+        in_features = self.input_dim * self.trend_feature_dim * 2
+        self.input_proj = nn.Linear(in_features, self.d_model)
+        self.resnet = nn.Sequential(
+            *[
+                _MCMEDResBlock1D(
+                    channels=self.d_model,
+                    kernel_size=int(kernel_size),
+                    dropout=float(dropout),
+                )
+                for _ in range(int(num_blocks))
+            ]
         )
-        stem_layers = []
-        for kernel_size, stride in zip(stem_kernel_sizes, stem_strides):
-            padding = int(kernel_size) // 2
-            stem_layers.extend([
-                nn.Conv1d(d_model, d_model, kernel_size=int(kernel_size), stride=int(stride), padding=padding),
-                nn.BatchNorm1d(d_model),
-                nn.GELU(),
-            ])
-        self.temporal_stem = nn.Sequential(*stem_layers) if stem_layers else nn.Identity()
-        self.stem_kernel_sizes = [int(k) for k in stem_kernel_sizes]
-        self.stem_strides = [int(s) for s in stem_strides]
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, d_model))
-        self.pos_embed = nn.Parameter(torch.zeros(1, max_seq_len + 1, d_model))
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_model,
-            nhead=nhead,
-            dim_feedforward=d_model * 2,
-            dropout=dropout,
-            activation="gelu",
-            batch_first=True,
-            norm_first=True,
-        )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-
-        self.proj = nn.Linear(d_model, emb_dim)
-
+        self.output_proj = nn.Linear(self.d_model, int(emb_dim))
         self.apply(self._init_weights)
+        self.init_resnet_identity_()
 
     def _init_weights(self, m) -> None:
-        if isinstance(m, nn.LayerNorm):
-            nn.init.ones_(m.weight)
-            nn.init.zeros_(m.bias)
-        elif isinstance(m, nn.Linear):
+        if isinstance(m, nn.Linear):
             nn.init.xavier_uniform_(m.weight)
             if m.bias is not None:
                 nn.init.zeros_(m.bias)
@@ -1363,105 +1862,41 @@ class MCMEDNumericsEncoder(nn.Module):
             nn.init.ones_(m.weight)
             nn.init.zeros_(m.bias)
 
-    def _add_positional_embeddings(self, x: torch.Tensor) -> torch.Tensor:
-        seq_len = x.size(1)
-        if seq_len > self.pos_embed.size(1):
-            extra = seq_len - self.pos_embed.size(1)
-            last_pos = self.pos_embed[:, -1:, :].expand(1, extra, -1)
-            pos_embed = torch.cat([self.pos_embed, last_pos], dim=1)
-        else:
-            pos_embed = self.pos_embed
-        return x + pos_embed[:, :seq_len]
+    def init_resnet_identity_(self) -> None:
+        """
+        Initialize residual branches inside each 1D ResBlock near zero so the
+        skip path dominates at initialization.
+        """
+        with torch.no_grad():
+            for block in self.resnet:
+                if not isinstance(block, _MCMEDResBlock1D):
+                    continue
+                block.conv2.weight.zero_()
+                if block.conv2.bias is not None:
+                    block.conv2.bias.zero_()
+                block.bn2.weight.zero_()
+                block.bn2.bias.zero_()
 
-    def _downsample_lengths(self, lengths: torch.Tensor) -> torch.Tensor:
-        out = lengths.to(dtype=torch.long)
-        for kernel_size, stride in zip(self.stem_kernel_sizes, self.stem_strides):
-            padding = kernel_size // 2
-            out = ((out + 2 * padding - kernel_size) // stride) + 1
-            out = torch.clamp(out, min=0)
-        return out
+    def forward(self, x: dict[str, torch.Tensor]) -> torch.Tensor:
+        trend_values = x["trend_values"]  # [B, T, V, F]
 
-    def _downsample_valid_mask(self, valid_mask: torch.Tensor) -> torch.Tensor:
-        out = valid_mask.to(dtype=torch.float32).unsqueeze(1)
-        for kernel_size, stride in zip(self.stem_kernel_sizes, self.stem_strides):
-            padding = kernel_size // 2
-            out = F.max_pool1d(out, kernel_size=kernel_size, stride=stride, padding=padding)
-        return out.squeeze(1) > 0.5
-
-    def forward(self, x):
-        valid_mask = None
-        if isinstance(x, dict):
-            if "trend_values" in x:
-                trend_values = x["trend_values"]
-                measure_mask = x["measure_mask"]
-                bin_counts = x["bin_counts"]
-                if trend_values.ndim != 4 or trend_values.size(2) != self.input_dim or trend_values.size(3) != self.trend_feature_dim:
-                    raise ValueError(
-                        f"Expected trend_values with shape [B, T, {self.input_dim}, {self.trend_feature_dim}], got {tuple(trend_values.shape)}"
-                    )
-
-                batch_size, seq_len, _, _ = trend_values.shape
-                valid_mask = (bin_counts > 0)
-                trend_values = trend_values.reshape(batch_size, seq_len, self.input_dim * self.trend_feature_dim)
-                measure_mask = measure_mask.float()
-                bin_counts = bin_counts.float().unsqueeze(-1)
-                x = torch.cat([trend_values, measure_mask, bin_counts], dim=-1)
-                x = self.trend_input_proj(x)
-                lengths = None
-            else:
-                values = x["values"]
-                mask = x.get("mask")
-                lengths = x.get("lengths")
-
-                if values.ndim != 3 or values.size(-1) != self.input_dim:
-                    raise ValueError(f"Expected numerics input with shape [B, T, {self.input_dim}], got {tuple(values.shape)}")
-
-                batch_size, seq_len, _ = values.shape
-                if mask is None:
-                    mask = ~torch.isnan(values)
-                mask = mask.float()
-                values = torch.nan_to_num(values, nan=0.0)
-
-                x = torch.cat([values, mask], dim=-1)
-                x = self.raw_input_proj(x)
-        else:
-            values = x
-            mask = None
-            lengths = None
-            if values.ndim != 3 or values.size(-1) != self.input_dim:
-                raise ValueError(f"Expected numerics input with shape [B, T, {self.input_dim}], got {tuple(values.shape)}")
-            batch_size, seq_len, _ = values.shape
-            if mask is None:
-                mask = ~torch.isnan(values)
-            mask = mask.float()
-            values = torch.nan_to_num(values, nan=0.0)
-            x = torch.cat([values, mask], dim=-1)
-            x = self.raw_input_proj(x)
+        batch_size, seq_len, _, _ = trend_values.shape
         if seq_len == 0:
-            x = x.new_empty((batch_size, 0, self.d_model))
-        else:
-            x = x.transpose(1, 2)
-            x = self.temporal_stem(x)
-            x = x.transpose(1, 2)
-            seq_len = x.shape[1]
-            if valid_mask is not None:
-                valid_mask = self._downsample_valid_mask(valid_mask.to(device=x.device))
-            elif lengths is not None:
-                lengths = self._downsample_lengths(lengths.to(device=x.device))
+            pooled = self.output_proj.weight.new_zeros((batch_size, self.d_model))
+            return self.output_proj(pooled)
 
-        cls_token = self.cls_token.expand(batch_size, -1, -1)
-        x = torch.cat([cls_token, x], dim=1)
-        x = self._add_positional_embeddings(x)
+        # valid[t] is true iff at least one feature in the time bin is observed.
+        time_valid = ~torch.isnan(trend_values).reshape(batch_size, seq_len, -1).all(dim=-1)
+        nan_mask = torch.isnan(trend_values).to(dtype=trend_values.dtype)
+        packed = torch.cat([torch.nan_to_num(trend_values, nan=0.0), nan_mask], dim=-1)
+        x = packed.reshape(batch_size, seq_len, self.input_dim * self.trend_feature_dim * 2)
 
-        if valid_mask is not None:
-            token_pad_mask = ~valid_mask.to(device=x.device, dtype=torch.bool)
-        elif lengths is not None:
-            lengths = lengths.to(device=x.device)
-            token_pad_mask = torch.arange(seq_len, device=x.device).unsqueeze(0) >= lengths.unsqueeze(1)
-        else:
-            token_pad_mask = torch.zeros(batch_size, seq_len, dtype=torch.bool, device=x.device)
-        cls_pad_mask = torch.zeros(batch_size, 1, dtype=torch.bool, device=x.device)
-        key_padding_mask = torch.cat([cls_pad_mask, token_pad_mask], dim=1)
+        x = self.input_proj(x)  # [B, T, D]
+        x = x.transpose(1, 2)  # [B, D, T]
+        x = self.resnet(x)  # [B, D, T]
+        x = x.transpose(1, 2)  # [B, T, D]
 
-        x = self.transformer(x, src_key_padding_mask=key_padding_mask)
-        return self.proj(x[:, 0])
+        weights = time_valid.to(device=x.device, dtype=x.dtype).unsqueeze(-1)
+        denom = weights.sum(dim=1).clamp_min(1.0)
+        pooled = (x * weights).sum(dim=1) / denom
+        return self.output_proj(pooled)

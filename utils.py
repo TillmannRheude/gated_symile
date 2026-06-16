@@ -2,6 +2,358 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from types import SimpleNamespace
+
+
+import torch
+import torch.nn as nn
+import math
+
+
+class _MCMEDResBlock1D(nn.Module):
+    def __init__(self, channels: int, kernel_size: int = 3, dropout: float = 0.1):
+        super().__init__()
+        padding = int(kernel_size) // 2
+        self.conv1 = nn.Conv1d(channels, channels, kernel_size=kernel_size, padding=padding)
+        self.bn1 = nn.BatchNorm1d(channels)
+        self.conv2 = nn.Conv1d(channels, channels, kernel_size=kernel_size, padding=padding)
+        self.bn2 = nn.BatchNorm1d(channels)
+        self.act = nn.GELU()
+        self.drop = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        residual = x
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.act(x)
+        x = self.drop(x)
+        x = self.conv2(x)
+        x = self.bn2(x)
+        return self.act(x + residual)
+
+class NoResidualTransformerEncoderLayer(nn.Module):
+    def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1,
+                 activation="relu", batch_first=True, norm_first=False):
+        super().__init__()
+        self.self_attn = nn.MultiheadAttention(
+            d_model, nhead, dropout=dropout, batch_first=batch_first
+        )
+        self.linear1 = nn.Linear(d_model, dim_feedforward)
+        self.dropout = nn.Dropout(dropout)
+        self.linear2 = nn.Linear(dim_feedforward, d_model)
+
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+
+        self.activation = F.relu if activation == "relu" else F.gelu
+        self.norm_first = norm_first
+
+    def _sa_block(self, x, attn_mask=None, key_padding_mask=None, is_causal=False):
+        x, _ = self.self_attn(
+            x, x, x,
+            attn_mask=attn_mask,
+            key_padding_mask=key_padding_mask,
+            need_weights=False,
+            is_causal=is_causal,
+        )
+        return self.dropout1(x)
+
+    def _ff_block(self, x):
+        x = self.linear2(self.dropout(self.activation(self.linear1(x))))
+        return self.dropout2(x)
+
+    def forward(self, src, src_mask=None, src_key_padding_mask=None, is_causal=False):
+        if self.norm_first:
+            x = self._sa_block(self.norm1(src), src_mask, src_key_padding_mask, is_causal=is_causal)
+            x = self._ff_block(self.norm2(x))
+        else:
+            x = self.norm1(self._sa_block(src, src_mask, src_key_padding_mask, is_causal=is_causal))
+            x = self.norm2(self._ff_block(x))
+        return x
+
+
+class ScaledResidualTransformerEncoderLayer(nn.TransformerEncoderLayer):
+    """
+    TransformerEncoderLayer with configurable residual strength alpha:
+
+        x <- x + alpha * block(x)
+
+    alpha=1.0 recovers the standard residual transformer. Smaller values weaken
+    the residual branch contribution while keeping the same attention/FFN
+    sublayers and normalization behavior.
+    """
+    def __init__(self, *args, residual_alpha: float = 1.0, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.residual_alpha = float(residual_alpha)
+
+    def forward(self, src, src_mask=None, src_key_padding_mask=None, is_causal=False):
+        x = src
+        if self.norm_first:
+            x = self.residual_alpha * x + (self._sa_block(
+                self.norm1(x),
+                src_mask,
+                src_key_padding_mask,
+                is_causal=is_causal,
+            ))
+            x = self.residual_alpha * x + (self._ff_block(self.norm2(x)))
+        else:
+            x = self.norm1(
+                self.residual_alpha * x + (self._sa_block(
+                    x,
+                    src_mask,
+                    src_key_padding_mask,
+                    is_causal=is_causal,
+                ))
+            )
+            x = self.norm2(self.residual_alpha * x + (self._ff_block(x)))
+        return x
+
+class _DummySelfAttn:
+    def __init__(self, batch_first=True):
+        self.batch_first = batch_first
+        self._qkv_same_embed_dim = True
+        self.in_proj_bias = None
+        self.in_proj_weight = None
+        self.out_proj = None
+
+class TokenwiseMLPEncoderLayer(nn.Module):
+    """
+    Drop-in replacement for TransformerEncoderLayer that removes attention and
+    applies the same MLP independently at every token position.
+
+    This keeps the forward signature expected by nn.TransformerEncoder so it
+    can be swapped in the same way as NoResidualTransformerEncoderLayer.
+    """
+    def __init__(
+        self,
+        d_model,
+        nhead=None,
+        dim_feedforward=2048,
+        dropout=0.1,
+        activation="relu",
+        batch_first=True,
+        norm_first=False,
+    ):
+        super().__init__()
+        self.self_attn = _DummySelfAttn(batch_first=batch_first)
+
+        self.d_model = int(d_model)
+        self.batch_first = bool(batch_first)
+        self.norm_first = bool(norm_first)
+
+        self.linear1 = nn.Linear(d_model, dim_feedforward)
+        self.dropout = nn.Dropout(dropout)
+        self.linear2 = nn.Linear(dim_feedforward, d_model)
+
+        self.norm = nn.LayerNorm(d_model)
+        self.out_dropout = nn.Dropout(dropout)
+
+        if activation == "relu":
+            self.activation = F.relu
+        elif activation == "gelu":
+            self.activation = F.gelu
+        else:
+            raise ValueError(f"Unsupported activation: {activation}")
+
+    def _mlp_block(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.linear1(x)
+        x = self.activation(x)
+        x = self.dropout(x)
+        x = self.linear2(x)
+        x = self.out_dropout(x)
+        return x
+
+    def forward(self, src, src_mask=None, src_key_padding_mask=None, is_causal=False):
+        # Kept for compatibility with nn.TransformerEncoder; this layer is
+        # intentionally token-wise and ignores sequence masks.
+        del src_mask, src_key_padding_mask, is_causal
+
+        if self.norm_first:
+            x = self._mlp_block(self.norm(src))
+        else:
+            x = self.norm(self._mlp_block(src))
+        return x
+
+
+class UniformAttentionEncoderLayer(nn.Module):
+    """
+    Drop-in encoder layer that replaces learned self-attention with fixed
+    uniform averaging over tokens:
+
+        h_i = (1 / T) sum_j x_j
+
+    followed by a position-wise feedforward block. This keeps the same forward
+    signature expected by nn.TransformerEncoder.
+    """
+    def __init__(
+        self,
+        d_model,
+        nhead=None,
+        dim_feedforward=2048,
+        dropout=0.1,
+        activation="relu",
+        batch_first=True,
+        norm_first=False,
+    ):
+        super().__init__()
+        self.d_model = int(d_model)
+        self.batch_first = bool(batch_first)
+        self.norm_first = bool(norm_first)
+
+        # Dummy attribute for nn.TransformerEncoder internal checks.
+        self.self_attn = _DummySelfAttn(batch_first=batch_first)
+
+        self.linear1 = nn.Linear(d_model, dim_feedforward)
+        self.dropout = nn.Dropout(dropout)
+        self.linear2 = nn.Linear(dim_feedforward, d_model)
+
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+
+        if activation == "relu":
+            self.activation = F.relu
+        elif activation == "gelu":
+            self.activation = F.gelu
+        else:
+            raise ValueError(f"Unsupported activation: {activation}")
+
+    def _uniform_attention_block(
+        self,
+        x: torch.Tensor,
+        src_key_padding_mask: torch.Tensor = None,
+    ) -> torch.Tensor:
+        if x.ndim != 3:
+            raise ValueError(f"Expected input of shape (B, T, D) or (T, B, D), got {tuple(x.shape)}")
+
+        if self.batch_first:
+            # x: (B, T, D)
+            if src_key_padding_mask is None:
+                mean_tok = x.mean(dim=1, keepdim=True)
+            else:
+                keep = (~src_key_padding_mask).to(dtype=x.dtype, device=x.device)  # (B, T)
+                denom = keep.sum(dim=1, keepdim=True).clamp_min(1.0)
+                mean_tok = (x * keep.unsqueeze(-1)).sum(dim=1, keepdim=True) / denom.unsqueeze(-1)
+            out = mean_tok.expand(-1, x.shape[1], -1)
+        else:
+            # x: (T, B, D)
+            if src_key_padding_mask is None:
+                mean_tok = x.mean(dim=0, keepdim=True)
+            else:
+                keep = (~src_key_padding_mask).to(dtype=x.dtype, device=x.device).transpose(0, 1)  # (T, B)
+                denom = keep.sum(dim=0, keepdim=True).clamp_min(1.0)
+                mean_tok = (x * keep.unsqueeze(-1)).sum(dim=0, keepdim=True) / denom.unsqueeze(-1)
+            out = mean_tok.expand(x.shape[0], -1, -1)
+
+        return self.dropout1(out)
+
+    def _ff_block(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.linear1(x)
+        x = self.activation(x)
+        x = self.dropout(x)
+        x = self.linear2(x)
+        x = self.dropout2(x)
+        return x
+
+    def forward(self, src, src_mask=None, src_key_padding_mask=None, is_causal=False):
+        del src_mask, is_causal
+
+        if self.norm_first:
+            x = self._uniform_attention_block(self.norm1(src), src_key_padding_mask=src_key_padding_mask)
+            x = self._ff_block(self.norm2(x))
+        else:
+            x = self.norm1(self._uniform_attention_block(src, src_key_padding_mask=src_key_padding_mask))
+            x = self.norm2(self._ff_block(x))
+        return x
+
+
+def sinusoidal_positional_encoding(
+    seq_len: int,
+    d_model: int,
+    device: torch.device = None,
+    dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    """
+    Standard sinusoidal positional encoding tensor of shape (1, seq_len, d_model).
+    """
+    if seq_len < 1:
+        raise ValueError(f"seq_len must be >= 1, got {seq_len}")
+    if d_model < 1:
+        raise ValueError(f"d_model must be >= 1, got {d_model}")
+
+    positions = torch.arange(seq_len, device=device, dtype=dtype).unsqueeze(1)  # (S, 1)
+    div_term = torch.exp(
+        torch.arange(0, d_model, 2, device=device, dtype=dtype) * (-math.log(10000.0) / d_model)
+    )  # (ceil(D/2),)
+
+    pe = torch.zeros(seq_len, d_model, device=device, dtype=dtype)
+    pe[:, 0::2] = torch.sin(positions * div_term)
+    if d_model > 1:
+        pe[:, 1::2] = torch.cos(positions * div_term[: pe[:, 1::2].shape[1]])
+
+    return pe.unsqueeze(0)  # (1, S, D)
+
+@torch.no_grad()
+def burkholz_relu_init_linear(layer: nn.Linear, mode: str = "orthogonal"):
+    """
+    Burkholz-Dubatovka block initialization for a ReLU Linear layer:
+
+        W = [[ W0, -W0],
+             [-W0,  W0]]
+
+    Requires both in_features and out_features to be even.
+    """
+    if not isinstance(layer, nn.Linear):
+        return
+
+    out_dim, in_dim = layer.weight.shape
+
+    if in_dim % 2 != 0 or out_dim % 2 != 0:
+        raise ValueError(
+            f"Burkholz init requires even dims, got in={in_dim}, out={out_dim}"
+        )
+
+    half_out = out_dim // 2
+    half_in = in_dim // 2
+
+    if mode == "gsm":
+        # Paper's GSM choice: sigma_w^2 = 2 / N_l.
+        # For PyTorch orientation, N_l corresponds to output layer width.
+        std = math.sqrt(2.0 / out_dim)
+        W0 = torch.randn(
+            half_out,
+            half_in,
+            device=layer.weight.device,
+            dtype=layer.weight.dtype,
+        ) * std
+
+    elif mode == "orthogonal":
+        W0 = torch.empty(
+            half_out,
+            half_in,
+            device=layer.weight.device,
+            dtype=layer.weight.dtype,
+        )
+        nn.init.orthogonal_(W0)
+
+        # Use gain 1, not sqrt(2), for the perfect-isometry variant.
+        # This matches the paper's sigma_w^2 = 1 orthogonal W0 condition.
+    else:
+        raise ValueError("mode must be 'gsm' or 'orthogonal'")
+
+    W = torch.empty_like(layer.weight)
+    W[:half_out, :half_in] = W0
+    W[:half_out, half_in:] = -W0
+    W[half_out:, :half_in] = -W0
+    W[half_out:, half_in:] = W0
+
+    layer.weight.copy_(W)
+
+    if layer.bias is not None:
+        layer.bias.zero_()
 
 
 class AdditiveCouplingBlock(nn.Module):

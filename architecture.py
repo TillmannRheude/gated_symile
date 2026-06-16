@@ -3,7 +3,7 @@ import math
 import torch.nn as nn
 import torch.nn.functional as F
 
-from utils import mimetic_init_svd_
+from utils import sinusoidal_positional_encoding
 
 class ModalityAttentionGate(nn.Module):
     def __init__(
@@ -227,21 +227,36 @@ class TransformerSymile(nn.Module):
         num_register_tokens: int = 0,
         use_mask_tokens: bool = False,
         candidate_dependent: bool = True,
+        input_dim: int = None,
+        leaky_relu_negative_slope: float = 0.0,
     ):
         super().__init__()
         d_model = transformer_params["d_model"]
+        use_sigmoid_attention = bool(transformer_params.get("use_sigmoid_attention", False))
+        use_sinusoidal_pe = bool(transformer_params.get("use_sinusoidal_pe", False))
+        num_register_tokens = int(transformer_params.get("num_register_tokens", num_register_tokens))
+        input_dim = d_model if input_dim is None else int(input_dim)
         self.max_modalities = int(max_modalities)
         self.seq_dims = list(seq_dims)
         self.num_register_tokens = int(num_register_tokens)
         self.use_mask_tokens = bool(use_mask_tokens)
         self.candidate_dependent = bool(candidate_dependent)
+        self.input_dim = input_dim
+        self.d_model = int(d_model)
+        self.use_sinusoidal_pe = use_sinusoidal_pe
 
-        #self.mod_projs = nn.ModuleList([
-        #    nn.Linear(d_model, d_model) for _ in range(self.max_modalities)
-        #])
-        #self.mod_embeddings = nn.ParameterList([
-        #    nn.Parameter(torch.zeros(1, 1, d_model)) for _ in range(self.max_modalities)
-        #])
+        self.input_projs = nn.ModuleList([
+            nn.Identity() 
+            if input_dim == d_model 
+            else 
+                nn.Sequential(
+                    nn.Linear(input_dim, d_model),
+                    nn.LeakyReLU(negative_slope=leaky_relu_negative_slope),
+                    nn.Linear(d_model, d_model),
+                )
+            for _ in range(self.max_modalities)
+        ])
+
         if self.use_mask_tokens:
             self.mask_tokens = nn.ParameterList([
                 nn.Parameter(torch.zeros(1, 1, d_model)) for _ in range(self.max_modalities)
@@ -254,8 +269,14 @@ class TransformerSymile(nn.Module):
         else:
             self.register_tokens = None
 
-        sigmoid_transformer = True
-        if not sigmoid_transformer:
+        if self.use_sinusoidal_pe:
+            total_tokens = int(sum(self.seq_dims)) + int(self.num_register_tokens)
+            pe = sinusoidal_positional_encoding(seq_len=total_tokens, d_model=d_model)
+            self.register_buffer("pos_encoding", pe, persistent=False)
+        else:
+            self.pos_encoding = None
+
+        if not use_sigmoid_attention:
             encoder_layer = nn.TransformerEncoderLayer(
                 d_model=d_model,
                 nhead=transformer_params["nhead"],
@@ -282,24 +303,17 @@ class TransformerSymile(nn.Module):
         self.proj_head = nn.Sequential(
             nn.LayerNorm(d_model * sum(seq_dims)),
             nn.Linear(d_model * sum(seq_dims), d_model),
-            nn.GELU(),
+            nn.LeakyReLU(negative_slope=leaky_relu_negative_slope),
             nn.Linear(d_model, proj_output_dim),
         )
-        #self.cls_token = nn.Parameter(torch.zeros(1, 1, d_model))
-        #self.linear = nn.Linear(d_model, proj_output_dim)
 
         self.apply(self._init_weights)
-        #for layer in self.transformer.layers:
-        #    for sublayer in layer.modules():
-        #        mimetic_init_svd_(sublayer)
         
         if self.num_register_tokens > 0:
             nn.init.normal_(self.register_tokens, mean=0.0, std=0.02)
         if self.mask_tokens is not None:
             for param in self.mask_tokens:
                 nn.init.normal_(param, mean=0.0, std=0.02)
-        #for param in self.mod_embeddings:
-        #    nn.init.normal_(param, mean=0.0, std=0.02)
 
     def _init_weights(self, m) -> None:
         if isinstance(m, nn.LayerNorm):
@@ -340,14 +354,13 @@ class TransformerSymile(nn.Module):
                 )
             source_mask = source_mask.to(device=embeddings[0].device, dtype=torch.bool)
 
-        """ 
         modality_tokens = []
-        token_slices = []
-        start = 0
         for m, embedding in enumerate(embeddings):
-            #tok = self.mod_projs[m](embedding)
-            tok = embedding
-            tok = tok + self.mod_embeddings[m]
+            if embedding.shape[-1] != self.input_dim:
+                raise ValueError(
+                    f"Expected modality {m} embedding dim {self.input_dim}, got {embedding.shape[-1]}."
+                )
+            tok = self.input_projs[m](embedding)
             if source_mask is not None:
                 missing = source_mask[:, m]
                 if missing.any():
@@ -355,27 +368,6 @@ class TransformerSymile(nn.Module):
                     missing_view = missing[:, None, None]
                     tok = torch.where(missing_view, mask_tok, tok)
             modality_tokens.append(tok)
-            end = start + tok.shape[1]
-            token_slices.append((start, end))
-            start = end
-        tokens = torch.cat(modality_tokens, dim=1)  # [B, sum(seq_dims), D]
-        """
-
-        modality_tokens = []
-        token_slices = []
-        start = 0
-        for m, embedding in enumerate(embeddings):
-            tok = embedding
-            if source_mask is not None:
-                missing = source_mask[:, m]
-                if missing.any():
-                    mask_tok = self.mask_tokens[m].expand(tok.shape[0], tok.shape[1], -1)
-                    missing_view = missing[:, None, None]
-                    tok = torch.where(missing_view, mask_tok, tok)
-            modality_tokens.append(tok)
-            end = start + tok.shape[1]
-            token_slices.append((start, end))
-            start = end
 
         tokens = torch.cat(modality_tokens, dim=1)  # [B, sum(T_m), D]
 
@@ -384,9 +376,12 @@ class TransformerSymile(nn.Module):
             reg = self.register_tokens.expand(tokens.shape[0], -1, -1)
             tokens = torch.cat([tokens, reg], dim=1)
 
-        # add cls token
-        #cls = self.cls_token.expand(tokens.shape[0], -1, -1)
-        #tokens = torch.cat([cls, tokens], dim=1)
+        if self.pos_encoding is not None:
+            if self.pos_encoding.shape[1] != tokens.shape[1]:
+                raise ValueError(
+                    f"Positional encoding length ({self.pos_encoding.shape[1]}) does not match token length ({tokens.shape[1]})."
+                )
+            tokens = tokens + self.pos_encoding.to(device=tokens.device, dtype=tokens.dtype)
 
         transformer_output = self.transformer(tokens)   # [B, M, D]
 
@@ -416,14 +411,28 @@ class TransformerSymile_Model(nn.Module):
         proj_output_dim: int = 1,
         seq_dims: list[int] = [1, 1, 1],
         candidate_dependent: bool = True,
+        leaky_relu_negative_slope: float = 0.0,
     ):
         super().__init__()
         self.candidate_dependent = bool(candidate_dependent)
+        encoders = getattr(contrastive_model, "encoders", None)
+        encoder_output_dim = transformer_params["d_model"]
+        if encoders is not None and len(encoders) > 0:
+            encoder_output_dim = getattr(encoders[0], "emb_dim", encoder_output_dim)
+            for encoder in encoders:
+                current_dim = getattr(encoder, "emb_dim", encoder_output_dim)
+                if int(current_dim) != int(encoder_output_dim):
+                    raise ValueError(
+                        "TransformerSymile expects all encoder output dimensions to match; "
+                        f"got {encoder_output_dim} and {current_dim}."
+                    )
         self.transformer = TransformerSymile(
             transformer_params=transformer_params,
             proj_output_dim=proj_output_dim,
             seq_dims=seq_dims,
             candidate_dependent=candidate_dependent,
+            input_dim=encoder_output_dim,
+            leaky_relu_negative_slope=leaky_relu_negative_slope,
         )
         self.contrastive_model = contrastive_model
 

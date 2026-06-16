@@ -5,19 +5,43 @@ monitor:
   metric: "val/acc_top1"
   mode: "max"
 
-geometry_preserving: "bounded_svd_linear"  # "residual"  # True
+regularizer_params:
+  m: 0.5
+  M: 5.0
+  w_low: 10.0
+  w_high: 1.0
+  lam: 1.0
+
+geometry_preserving: "False"  # False / residual / bounded_svd_linear
 bounded_svd_params:
   sv_min: 0.5
   sv_max: 1.2
   learnable_singular_values: False
-
 activation_fn_params:
-  leaky_relu_negative_slope: 0.01
+  leaky_relu_negative_slope: 0.0
 
+n_modalities: 3
+
+# dataset feature layout: 1d -> (B, D), 2d -> (B, S, D_token)
+feature_layout: "1d"
+seq_len: 16
+
+# encoder input layout: 1d uses MLP, 2d uses small transformer + mean pooling
+input_layout: "1d"
+sequence_encoder_params:
+  nhead: 2
+  num_layers: 2
+  dropout: 0.0
+  dim_feedforward_mult: 1
+  layer_type: "transformer"   # transformer / tokenwise_mlp / uniform_attention
+  residuals: True
+  residual_alpha: 1.0
 
 input_dim: 128
 n_samples: 30000
 
+# for feature_layout=1d: per-modality feature dim D
+# for feature_layout=2d: per-token feature dim D_token (effective dim = seq_len * D_token)
 dims_modality: [128, 128, 128]
 
 n_bits: 16
@@ -27,9 +51,13 @@ n_bits: 16
 embed_mode: "u_v_uv"
 
 # keep real signal (0.5 kills info completely)
+# for n_modalities=2 use one entry (e.g. [0.0])
+#p_flips: [0.0]
 p_flips: [0.0, 0.0]
 
 # corruption probabilities
+# for n_modalities=2 use two entries (A,B), for n_modalities=3 use three (A,B,C)
+#p_corrs: [0.0, 0.5]
 p_corrs: [0.0, 1.0, 1.0]
 
 # use misleading corruption (not gaussian) so ungated gets pulled the wrong way
@@ -40,6 +68,12 @@ corr_modes: "swap_signal"  # "swap_signal"
 bc_corr_exclusive: true
 bc_corr_p: null
 bc_corr_split: 0.5
+
+# Optional (bimodal only, n_modalities=2): make A/B corruption mutually exclusive (per sample).
+# If enabled and `ab_corr_p` is null, this expects `p_corrs[0] == p_corrs[1]` and uses that value.
+ab_corr_exclusive: true
+ab_corr_p: 0.5
+ab_corr_split: 0.5
 
 # make SNR low so the model can't just ignore corruption implicitly
 signal_scale: 1.0

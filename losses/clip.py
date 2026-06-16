@@ -37,3 +37,20 @@ def clip(r_a, r_b, r_c, logit_scale, negative_sampling=None, bias=None, **kwargs
     loss_bc = compute_pairwise_clip(r_b, r_c, logit_scale)
     
     return (loss_ab + loss_ac + loss_bc) / 3.0
+
+
+def bimodal_clip(r_a, r_b, logit_scale, negative_sampling=None, bias=None, **kwargs):
+    """
+    Computes CLIP loss for 2 modalities.
+
+    Args:
+        r_a, r_b (torch.Tensor): Representation vectors of size (batch_sz, d).
+        logit_scale (torch.Tensor): Learned temperature parameter.
+        negative_sampling (str): Ignored. Kept for API compatibility.
+        bias (torch.Tensor): Ignored. Kept for API compatibility.
+        **kwargs: Additional arguments for API compatibility.
+
+    Returns:
+        loss (torch.Tensor): Symmetric pairwise CLIP loss.
+    """
+    return compute_pairwise_clip(r_a, r_b, logit_scale)

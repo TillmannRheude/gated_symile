@@ -1,12 +1,12 @@
 modelname: triangle
 
-emb_dim: 6144  # 256
+emb_dim: 1024  # 256
 
 negative_sampling: n_squared  # n_squared, pair
-logit_scale_init: 0  # -2.65926
+logit_scale_init: -2.0  # -2.65926
 embedding_norm: True
 
-pair_num_negatives: 512  # number of negatives for pair sampling, 
+pair_num_negatives: 128  # number of negatives for pair sampling, 
 
 use_gate: False
 use_null: True

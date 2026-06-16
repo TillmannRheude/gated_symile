@@ -5,32 +5,41 @@ monitor:
   metric: "val/acc_top1"
   mode: "max"
 
-max_waveform_windows: 0
+geometry_preserving: False
+leaky_relu_negative_slope: 0.0
+
+max_waveform_windows: 64
+require_all_modalities: false  # false
+candidate_idx: 1  # 0=demographics, 1=rads, 2=numerics
+retrieval_mode: "preselected"  # "preselected" / "global"
+preselected_num_candidates: 500
+rad_for_main: future           # future for training/retrieval; input for probing
+require_both_rad_streams: false
 
 radiology:
-  text_model_id: "bert-base-uncased"
-  max_length: 256
-  use_pretrain_bert: True
-  freeze_pretrained_bert: True
-  cache_dir: "/sc-projects/sc-proj-ukb-cvd/projects/data/tmp_hf_cache"
-  local_files_only: False
+  text_model_id: StanfordAIMI/RadBERT
   proj_hidden_dim: 512
+  dropout: 0.0
 
 numerics:
   trend_feature_dim: 7
-  stem_kernel_sizes: []
-  stem_strides: []
-  transformer:
+  resnet:
     d_model: 256
-    nhead: 1
-    num_layers: 2
+    num_blocks: 3
+    kernel_size: 3
     dropout: 0.0
 
 waveform_ii:
-  stem_kernel_sizes: []
-  stem_strides: []
-  transformer:
+  resnet:
     d_model: 256
-    nhead: 1
-    num_layers: 2
-    dropout: 0.0
+    num_blocks: 3
+    kernel_size: 13
+    downsample_stride: 8
+    num_input_proj_layers: 3
+    leaky_relu_negative_slope: 0.4
+    dropout: 0.2
+
+demographics:
+  input_dim: 12
+  proj_hidden_dim: 512
+  dropout: 0.0

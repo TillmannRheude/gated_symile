@@ -1,10 +1,10 @@
 defaults:
   - _self_
   - datamodule: default
-  - encoders: synthetic_xnor 
-  - modelname: triangle  # clip / symile
+  - encoders: synthetic_xnor  # synthetic_xnor / symile_xor
+  - modelname: symile_attention  # clip / symile / triangle / gram / comm / symile_attention
 
-dataset_name: synthetic_xnor 
+dataset_name: synthetic_xnor  # synthetic_xnor / symile_xor
 batch_size: 128
 split_nr: 1
 devices: 1

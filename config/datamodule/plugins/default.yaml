@@ -1,6 +1,7 @@
 defaults:
  - nmr: modality_nmr  # 249
  - ehr: modality_ehr  # 3584
+ # - ehr_future: modality_ehr # 3062
  - olink: modality_olink  # 1463
  #- prs: modality_prs  # 135
  #- bloodbio: modality_bloodbio  # 30

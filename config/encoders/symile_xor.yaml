@@ -1,0 +1,33 @@
+defaults:
+  - _self_
+
+monitor:
+  metric: "val/acc_top1"
+  mode: "max"
+
+regularizer_params:
+  m: 0.5
+  M: 5.0
+  w_low: 10.0
+  w_high: 1.0
+  lam: 1.0
+
+geometry_preserving: "residual"  # False / residual / bounded_svd_linear
+bounded_svd_params:
+  sv_min: 0.5
+  sv_max: 1.2
+  learnable_singular_values: False
+activation_fn_params:
+  leaky_relu_negative_slope: 0.4
+
+input_layout: "1d"
+input_dim: 5
+candidate_idx: 1
+
+# Symile XOR dataset parameters
+n_samples: 16000
+p: 1.0
+value_mode: "zero_one"  # "zero_one" or "minus_plus"
+dim: 5
+signal_scale: 1.0
+distractor_std: 0.0

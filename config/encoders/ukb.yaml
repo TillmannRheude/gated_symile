@@ -6,6 +6,8 @@ monitor:
   mode: "max"
 
 geometry_preserving: False
+leaky_relu_negative_slope: 0.0
+
 
 # modalities to use for learning 
 modalities: ["nmr", "ehr", "olink"]
@@ -17,6 +19,10 @@ nmr:
     hidden_dims: [1024,2048,4096]
     hidden_dropouts: [0.2, 0.2, 0.2]
 ehr:
+  mlp:
+    hidden_dims: [1024,2048,4096]
+    hidden_dropouts: [0.6, 0.6, 0.6]
+ehr_future:
   mlp:
     hidden_dims: [1024,2048,4096]
     hidden_dropouts: [0.6, 0.6, 0.6]

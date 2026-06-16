@@ -1,10 +1,8 @@
-import os 
-from functools import partial
-
 import pytorch_lightning as pl
 from torch.utils.data import DataLoader
 
 from datasets.mcmed import MCMEDDataset, mcmed_collate_fn
+from datasets.mcmed_clinical import MCMEDClinicalDataset, mcmed_clinical_collate_fn
 
 class DataModule_MCMED(pl.LightningDataModule):
     def __init__(
@@ -13,6 +11,9 @@ class DataModule_MCMED(pl.LightningDataModule):
         split_nr: int = 1,
         max_waveform_windows: int = 0,
         radiology_model_params: dict = None,
+        require_all_modalities: bool = False,
+        rad_for_main: str = "future",
+        require_both_rad_streams: bool = False,
     ):
         super().__init__()
 
@@ -21,71 +22,89 @@ class DataModule_MCMED(pl.LightningDataModule):
         self.split_nr = split_nr
         self.max_waveform_windows = max_waveform_windows
         self.radiology_model_params = radiology_model_params or {}
+        self.require_all_modalities = bool(require_all_modalities)
+        self.rad_for_main = str(rad_for_main)
+        self.require_both_rad_streams = bool(require_both_rad_streams)
 
     def setup(self, stage):
+        """ 
         self.ds_train = MCMEDDataset(
             split_family="chrono",
             split_name="train",
+            #data_dir="/sc-resources/dh-mimic/mimic_symile/mcmed_aws/data_preprocessed/future_rads_cv/fold_0/",
             max_waveform_windows=self.max_waveform_windows,
+            require_all_modalities=self.require_all_modalities,
             #split_nr=self.split_nr,
         )
         self.ds_val = MCMEDDataset(
             split_family="chrono",
             split_name="val",
+            #data_dir="/sc-resources/dh-mimic/mimic_symile/mcmed_aws/data_preprocessed/future_rads_cv/fold_0/",
             max_waveform_windows=self.max_waveform_windows,
+            require_all_modalities=self.require_all_modalities,
             #split_nr=self.split_nr,
         )
         self.ds_test = MCMEDDataset(
             split_family="chrono",
             split_name="test",
+            #data_dir="/sc-resources/dh-mimic/mimic_symile/mcmed_aws/data_preprocessed/future_rads_cv/fold_0/",
             max_waveform_windows=self.max_waveform_windows,
+            require_all_modalities=self.require_all_modalities,
+            #split_nr=self.split_nr,
+        )
+        """
+
+        self.ds_train = MCMEDClinicalDataset(
+            split_family="chrono",
+            split_name="train",
+            #data_dir="/sc-resources/dh-mimic/mimic_symile/mcmed_aws/data_preprocessed/aggregated_memmap_clinical_events/",
+            require_all_modalities=self.require_all_modalities,
+            rad_for_main=self.rad_for_main,
+            require_both_rad_streams=self.require_both_rad_streams,
+            #split_nr=self.split_nr,
+        )
+        self.ds_val = MCMEDClinicalDataset(
+            split_family="chrono",
+            split_name="val",
+            #data_dir="/sc-resources/dh-mimic/mimic_symile/mcmed_aws/data_preprocessed/aggregated_memmap_clinical_events/",
+            require_all_modalities=self.require_all_modalities,
+            rad_for_main=self.rad_for_main,
+            require_both_rad_streams=self.require_both_rad_streams,
+            #split_nr=self.split_nr,
+        )
+        self.ds_test = MCMEDClinicalDataset(
+            split_family="chrono",
+            split_name="test",
+            #data_dir="/sc-resources/dh-mimic/mimic_symile/mcmed_aws/data_preprocessed/aggregated_memmap_clinical_events/",
+            require_all_modalities=self.require_all_modalities,
+            rad_for_main=self.rad_for_main,
+            require_both_rad_streams=self.require_both_rad_streams,
             #split_nr=self.split_nr,
         )
 
     def train_dataloader(self):
-        collate = partial(
-            mcmed_collate_fn,
-            text_model_id=self.radiology_model_params.get("text_model_id", "bert-base-uncased"),
-            text_max_length=int(self.radiology_model_params.get("max_length", 256)),
-            text_cache_dir=self.radiology_model_params.get("cache_dir", "/sc-projects/sc-proj-ukb-cvd/projects/data/tmp_hf_cache"),
-            text_local_files_only=bool(self.radiology_model_params.get("local_files_only", False)),
-        )
         return DataLoader(
             self.ds_train, batch_size=self.batch_size,
             shuffle=True,
             num_workers=self.num_workers,
             drop_last=True,
-            collate_fn=collate,
+            collate_fn=mcmed_clinical_collate_fn,
         )
 
     def val_dataloader(self):
-        collate = partial(
-            mcmed_collate_fn,
-            text_model_id=self.radiology_model_params.get("text_model_id", "bert-base-uncased"),
-            text_max_length=int(self.radiology_model_params.get("max_length", 256)),
-            text_cache_dir=self.radiology_model_params.get("cache_dir", "/sc-projects/sc-proj-ukb-cvd/projects/data/tmp_hf_cache"),
-            text_local_files_only=bool(self.radiology_model_params.get("local_files_only", False)),
-        )
         return DataLoader(
             self.ds_val, batch_size=self.batch_size,
             shuffle=False,
             num_workers=self.num_workers,
             drop_last=False,
-            collate_fn=collate,
+            collate_fn=mcmed_clinical_collate_fn,
         )
 
     def test_dataloader(self):
-        collate = partial(
-            mcmed_collate_fn,
-            text_model_id=self.radiology_model_params.get("text_model_id", "bert-base-uncased"),
-            text_max_length=int(self.radiology_model_params.get("max_length", 256)),
-            text_cache_dir=self.radiology_model_params.get("cache_dir", "/sc-projects/sc-proj-ukb-cvd/projects/data/tmp_hf_cache"),
-            text_local_files_only=bool(self.radiology_model_params.get("local_files_only", False)),
-        )
         return DataLoader(
             self.ds_test, batch_size=self.batch_size,
             shuffle=False,
             num_workers=self.num_workers,
             drop_last=False,
-            collate_fn=collate,
+            collate_fn=mcmed_clinical_collate_fn,
         )
