@@ -70,6 +70,7 @@ class SyntheticXNORModel(LightningModuleParent):
         r_a, r_b, r_c = embeddings
         if r_a.numel() == 0:
             return []
+        self._set_retrieval_candidate_scores(int(r_a.shape[0]) * int(r_a.shape[0]))
 
         # If training uses pair sampling with gating, make validation candidate-dependent too:
         # for each query i and candidate j, compute gate weights from (A_j, B_i, C_i).

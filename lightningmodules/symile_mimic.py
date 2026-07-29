@@ -240,6 +240,7 @@ class SymileMIMICModel(LightningModuleParent):
             pos_idx.append(j)
 
         if not keep_q:
+            self._set_retrieval_candidate_scores(0)
             return {
                 "acc@top1": float("nan"),
                 "acc@top3": float("nan"),
@@ -268,6 +269,7 @@ class SymileMIMICModel(LightningModuleParent):
 
         correct_pred_top1 = int((pred_id == true_id).sum().item())
         Bk = int(true_id.shape[0])
+        self._set_retrieval_candidate_scores(Bk * int(cand_r_c.shape[0]))
 
         correct_pred_top3 = 0
         correct_pred_top5 = 0
@@ -412,6 +414,7 @@ class SymileMIMICModel(LightningModuleParent):
             mask = (retrieval_ds["label_hadm_id"] == true_hadm_id) & (retrieval_ds["label"] == 0)
             neg_r_c = retrieval_ds["r_c"][mask] # (candidate_n - 1, d)
             r_c = torch.cat([r_c.unsqueeze(0), neg_r_c], dim=0) # (candidate_n, d)
+            candidates_per_query.append(int(r_c.shape[0]))
 
             candidate_label = torch.zeros(len(r_c), dtype=torch.long)
             candidate_label[0] = 1
@@ -531,6 +534,7 @@ class SymileMIMICModel(LightningModuleParent):
         retrieval_acc_top1 = correct_pred_top1 / len(query_hadm_id)
         retrieval_acc_top3 = correct_pred_top3 / len(query_hadm_id)
         retrieval_acc_top5 = correct_pred_top5 / len(query_hadm_id)
+        self._set_retrieval_candidate_scores(sum(candidates_per_query))
 
         # Aggregate diagnostics
         ranks_t = torch.tensor(ranks, dtype=torch.float32)

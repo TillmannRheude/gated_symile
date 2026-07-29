@@ -11,6 +11,18 @@ modalities: ["nmr", "ehr", "bloodbio"]
 # candiate for retrieval from list "modalities"
 candidate_idx: 0
 
+missing_strategy: "zero_mask"  # zero_mask / mean
+modality_dropout_rate: 0.0
+modality_dropout_scope: "query"  # query / all
+
+eval_corruption:
+  mode: "none"        # none / permute
+  modality: "ehr"     # query modality to permute during eval
+  fraction: 0.0
+  seed: 420
+  splits: ["val", "test"]
+  max_records: 5000
+
 nmr:
   mlp:
     hidden_dims: [1024, 2048, 4096]
@@ -103,4 +115,3 @@ infectiousdiseases:
   mlp:
     hidden_dims: [512, 256, 128]
     hidden_dropouts: [0.2, 0.2, 0.2]
-

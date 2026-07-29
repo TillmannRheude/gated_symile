@@ -73,12 +73,17 @@ class ModalityAttentionGate(nn.Module):
         if self.gate_mode == "attention":
             self.q_proj = nn.ModuleList([nn.Linear(self.D, self.d_k, bias=False) for _ in range(self.M)])
             self.k_proj = nn.ModuleList([nn.Linear(self.D, self.d_k, bias=False) for _ in range(self.M)])
-            self.null_head = nn.Sequential(
-                nn.LayerNorm(self.D),
-                nn.Linear(self.D, self.d_k),
-                nn.ReLU(),
-                nn.Linear(self.d_k, 1),
-            )
+            # null_head is only used when use_null=True; create it conditionally so DDP
+            # does not see unused parameters under find_unused_parameters=False.
+            if self.use_null:
+                self.null_head = nn.Sequential(
+                    nn.LayerNorm(self.D),
+                    nn.Linear(self.D, self.d_k),
+                    nn.ReLU(),
+                    nn.Linear(self.d_k, 1),
+                )
+            else:
+                self.null_head = None
         else:
             self.q_proj = None
             self.k_proj = None
@@ -140,13 +145,11 @@ class ModalityAttentionGate(nn.Module):
 
                 s_t = scores[:, t, mask]  # fp32
 
-                if self.use_null:
-                    null_raw = (self.null_head(E[:, t, :]).squeeze(-1) + self.null_logit[t].float()) / temp  # fp32
-                else:
-                    null_raw = (self.null_head(E[:, t, :]).squeeze(-1) / temp)  # fp32
-
                 if self.gate_type == "softmax":
                     if self.use_null:
+                        null_raw = (
+                            self.null_head(E[:, t, :]).squeeze(-1) + self.null_logit[t].float()
+                        ) / temp  # fp32
                         s_aug = torch.cat([s_t, null_raw[:, None]], dim=1)
                         p_aug = torch.softmax(s_aug, dim=1)
                         w_t = p_aug[:, :-1]  # fp32
@@ -155,6 +158,9 @@ class ModalityAttentionGate(nn.Module):
                 elif self.gate_type == "sigmoid":
                     w_t = torch.sigmoid(s_t)  # fp32
                     if self.use_null:
+                        null_raw = (
+                            self.null_head(E[:, t, :]).squeeze(-1) + self.null_logit[t].float()
+                        ) / temp  # fp32
                         p_null = torch.sigmoid(null_raw)  # fp32
                         w_t = w_t * (1.0 - p_null[:, None])
 

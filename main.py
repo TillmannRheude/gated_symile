@@ -31,7 +31,11 @@ torch.set_float32_matmul_precision("high")
 def main(cfg) -> None:
     set_all_seeds(seed=cfg.seed)
     wandb.finish()
-    logger = WandbLogger(project=cfg.wandb.project, dir="wandb/")
+    logger = WandbLogger(
+        project=cfg.wandb.project,
+        dir="wandb/",
+        group=None if cfg.wandb.group == "None" else cfg.wandb.group,
+    )
 
     model = build_model(cfg)
     datamodule = build_datamodule(cfg)

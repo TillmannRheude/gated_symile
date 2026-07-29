@@ -124,6 +124,10 @@ def build_model(cfg: dict):
         modalities = cfg["encoders"]["modalities"]
         input_dims_modalities = {k: v for k, v in input_dims_modalities.items() if k in modalities}
         encoders = nn.ModuleList([])
+        missing_strategy = cfg["encoders"].get("missing_strategy", "zero_mask")
+        encoder_combine_eids_as = cfg["datamodule"]["combine_eids_as"]
+        if encoder_combine_eids_as == "union" and missing_strategy == "mean":
+            encoder_combine_eids_as = "intersect"
 
         for mod in modalities:
             encoders.append(
@@ -132,7 +136,7 @@ def build_model(cfg: dict):
                     hidden_dims=cfg["encoders"][mod]["mlp"]["hidden_dims"],
                     hidden_dropouts=cfg["encoders"][mod]["mlp"]["hidden_dropouts"],
                     emb_dim=cfg["modelname"]["emb_dim"],
-                    combine_eids_as=cfg["datamodule"]["combine_eids_as"],
+                    combine_eids_as=encoder_combine_eids_as,
                     modality_name=mod,
                 )
             )
@@ -146,6 +150,10 @@ def build_model(cfg: dict):
             modelname=modelname,
             params_retrival_ds=params_retrival_ds,
             modalities=cfg["encoders"]["modalities"],
+            eval_corruption=cfg["encoders"].get("eval_corruption", {}),
+            missing_strategy=missing_strategy,
+            modality_dropout_rate=cfg["encoders"].get("modality_dropout_rate", 0.0),
+            modality_dropout_scope=cfg["encoders"].get("modality_dropout_scope", "query"),
         )
     
     # Synthetic XNOR
@@ -220,7 +228,7 @@ def build_datamodule(cfg: dict):
             signal_scale = cfg["encoders"]["signal_scale"],
             distractor_std = cfg["encoders"]["distractor_std"],
             a_rule = cfg["encoders"]["a_rule"],
-            seed = cfg["seed"],
+            seed = cfg["encoders"].get("data_seed", 420),
         )
     
     else:

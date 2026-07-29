@@ -107,6 +107,12 @@ class LightningModuleParent(pl.LightningModule):
 
         if self.params_method["embedding_norm"]:
             embeddings = [nn.functional.normalize(emb, dim=1) for emb in embeddings]
+
+        # Dataset-specific training augmentations operate on normalized
+        # embeddings before candidate gathering and loss construction.
+        prepare_embeddings = getattr(self, "prepare_embeddings_for_loss", None)
+        if callable(prepare_embeddings):
+            embeddings = prepare_embeddings(embeddings, batch=batch, split=set)
         
         # DDP for Symile n^2
         if (
@@ -418,12 +424,100 @@ class LightningModuleParent(pl.LightningModule):
             on_epoch=True,
             sync_dist=True,
         )
+
+    def _candidate_bank_size(self) -> int:
+        bank = getattr(self, "candidate_bank", None)
+        if not isinstance(bank, dict):
+            return 0
+        for key in ("r", "r_i"):
+            if key in bank and hasattr(bank[key], "shape"):
+                return int(bank[key].shape[0])
+        return 0
+
+    def _set_retrieval_candidate_scores(self, num_candidate_scores: int) -> None:
+        self._last_retrieval_candidate_scores = int(num_candidate_scores)
+
+    def _start_retrieval_resource_timer(self) -> float:
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.reset_peak_memory_stats()
+        return time.perf_counter()
+
+    def _log_retrieval_resource_metrics(
+        self,
+        split: str,
+        t0: float,
+        num_candidate_scores: int,
+        sync_dist: bool = True,
+        rank_zero_only: bool = False,
+    ) -> None:
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+
+        runtime_s = float(time.perf_counter() - float(t0))
+        num_candidate_scores = int(num_candidate_scores)
+        candidates_per_sec = (
+            float(num_candidate_scores) / runtime_s
+            if runtime_s > 0.0 and num_candidate_scores > 0
+            else 0.0
+        )
+
+        device = self.device
+        runtime_t = torch.tensor(runtime_s, device=device, dtype=torch.float32)
+        cps_t = torch.tensor(candidates_per_sec, device=device, dtype=torch.float32)
+
+        if torch.cuda.is_available():
+            peak_alloc_mb = torch.cuda.max_memory_allocated() / 1024**2
+            peak_reserved_mb = torch.cuda.max_memory_reserved() / 1024**2
+        else:
+            peak_alloc_mb = 0.0
+            peak_reserved_mb = 0.0
+
+        self.log(
+            f"{split}/retrieval_runtime_s",
+            runtime_t,
+            on_step=False,
+            on_epoch=True,
+            sync_dist=sync_dist,
+            rank_zero_only=rank_zero_only,
+        )
+        self.log(
+            f"{split}/candidates_per_sec",
+            cps_t,
+            on_step=False,
+            on_epoch=True,
+            sync_dist=sync_dist,
+            rank_zero_only=rank_zero_only,
+        )
+        self.log(
+            f"{split}/retrieval_peak_mem_allocated_mb",
+            torch.tensor(float(peak_alloc_mb), device=device, dtype=torch.float32),
+            on_step=False,
+            on_epoch=True,
+            sync_dist=sync_dist,
+            rank_zero_only=rank_zero_only,
+        )
+        self.log(
+            f"{split}/retrieval_peak_mem_reserved_mb",
+            torch.tensor(float(peak_reserved_mb), device=device, dtype=torch.float32),
+            on_step=False,
+            on_epoch=True,
+            sync_dist=sync_dist,
+            rank_zero_only=rank_zero_only,
+        )
         
     def validation_step(self, batch, batch_idx):
         loss, embeddings = self.shared_step(batch, "val", return_embeddings=True)
 
         if hasattr(self, "retrieval_step"):
+            self._last_retrieval_candidate_scores = None
+            retrieval_t0 = self._start_retrieval_resource_timer()
             accs = self.retrieval_step(batch, embeddings, split="val") or []
+            num_candidate_scores = getattr(self, "_last_retrieval_candidate_scores", None)
+            if num_candidate_scores is None:
+                num_candidate_scores = len(accs) * self._candidate_bank_size()
+            if len(accs) > 0 or int(num_candidate_scores) > 0:
+                self._log_retrieval_resource_metrics("val", retrieval_t0, int(num_candidate_scores))
 
             ddp = dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1
 
@@ -548,7 +642,17 @@ class LightningModuleParent(pl.LightningModule):
         # -------------------------
         if hasattr(self, "run_zeroshot_retrieval"):
             if self.trainer.is_global_zero:
+                self._last_retrieval_candidate_scores = None
+                retrieval_t0 = self._start_retrieval_resource_timer()
                 acc_dict = self.run_zeroshot_retrieval("val")
+                num_candidate_scores = int(getattr(self, "_last_retrieval_candidate_scores", 0) or 0)
+                self._log_retrieval_resource_metrics(
+                    "val",
+                    retrieval_t0,
+                    num_candidate_scores,
+                    sync_dist=False,
+                    rank_zero_only=True,
+                )
                 acc_top1 = float(acc_dict["acc@top1"])
             else:
                 acc_top1 = float("nan")

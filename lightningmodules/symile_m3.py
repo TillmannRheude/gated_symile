@@ -50,6 +50,8 @@ class SymileM3Model(LightningModuleParent):
 
     def validation_step(self, batch, batch_idx):
         loss, embeddings = self.shared_step(batch, "val", return_embeddings=True)
+        self._last_retrieval_candidate_scores = None
+        retrieval_t0 = self._start_retrieval_resource_timer()
         accuracies = self.batch_retrieval(
             r_i=self.model.encoders[1](batch["image"].to(self.device),
                                        batch["image_missing"].to(self.device)),
@@ -58,6 +60,11 @@ class SymileM3Model(LightningModuleParent):
             cls_id=batch["cls_id"].to(self.device),
             all_observed=batch["all_observed"].to(self.device),
         )
+        num_candidate_scores = getattr(self, "_last_retrieval_candidate_scores", None)
+        if num_candidate_scores is None:
+            num_candidate_scores = len(accuracies) * self._candidate_bank_size()
+        if len(accuracies) > 0 or int(num_candidate_scores) > 0:
+            self._log_retrieval_resource_metrics("val", retrieval_t0, int(num_candidate_scores))
         acc_tensor = torch.tensor(accuracies, device=self.device)
         gathered = self.all_gather(acc_tensor)
         if self.trainer.is_global_zero:
@@ -80,6 +87,7 @@ class SymileM3Model(LightningModuleParent):
         cls_id = cls_id[mask]
         if r_i.numel() == 0:
             return []
+        self._set_retrieval_candidate_scores(int(r_i.shape[0]) * int(r_i.shape[0]))
         logits = zeroshot_retrieval_logits(
             r_i, [r_a, r_t], self.logit_scale.exp(), bias=self.bias, modelname=self.modelname
         )

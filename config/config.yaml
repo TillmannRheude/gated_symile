@@ -1,11 +1,11 @@
 defaults:
   - _self_
   - datamodule: default
-  - encoders: synthetic_xnor  # symile_mimic / ukb / synthetic_xnor
-  - modelname: clip  # clip / symile / triangle / gram
+  - encoders: ukb  # symile_mimic / ukb / synthetic_xnor
+  - modelname: symile  # clip / symile / triangle / gram
 
-dataset_name: synthetic_xnor  # symile_mimic / ukb / synthetic_xnor
-batch_size: 128
+dataset_name: ukb  # symile_mimic / ukb / synthetic_xnor
+batch_size: 32
 split_nr: 1
 devices: 1
 
@@ -26,7 +26,7 @@ patience: 5
 monitor: "val/acc_top1"
 monitor_mode: "max"
 wandb:
-  project: "gatedsymile"
+  project: "gatedsymile_sincerebuttal"
   group: None
 
 ckpt_dir: "checkpoints"

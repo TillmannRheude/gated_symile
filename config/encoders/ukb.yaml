@@ -11,6 +11,24 @@ modalities: ["nmr", "ehr", "olink"]
 # candiate for retrieval from list "modalities"
 candidate_idx: 2
 
+missing_strategy: "zero_mask"  # zero_mask / mean
+modality_dropout_rate: 0.0
+modality_dropout_scope: "query"  # query / all
+
+eval_corruption:
+  mode: "none"        # none / permute
+  modality: "nmr"     # query modality to permute during eval
+  fraction: 0.0
+  seed: 420
+  splits: ["val", "test"]
+  max_records: 5000
+  # When mode=permute, future gated-Symile trials receive balanced,
+  # disjoint training corruption while evaluation remains reproducible.
+  train_enabled: true
+  train_nmr_fraction: 0.15
+  train_ehr_fraction: 0.15
+  suppression_quantile: 0.05
+
 nmr:
   mlp:
     hidden_dims: [1024, 512, 256]
@@ -103,4 +121,3 @@ infectiousdiseases:
   mlp:
     hidden_dims: [512, 256, 128]
     hidden_dropouts: [0.2, 0.2, 0.2]
-

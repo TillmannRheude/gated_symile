@@ -7,6 +7,7 @@ monitor:
 
 input_dim: 128
 n_samples: 30000
+data_seed: 420
 
 dims_modality: [128, 128, 128]
 
