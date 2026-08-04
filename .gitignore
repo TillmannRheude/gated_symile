@@ -1,12 +1,11 @@
 wandb/
 
 outputs
-*.out
-*.txt
+**/*.out
+**/*.txt
 
 udm
 checkpoints
-outputs
 visualization
 debug.ipynb
 test
@@ -16,8 +15,7 @@ config/datamodule/*
 
 __pycache__/
 
-linear_probe*
-probe
 test_ckpt
 
 eval
+ukb_audit_reports/
