@@ -1,0 +1,8 @@
+name: TabularPlugin
+init: _init_ 
+
+data_paths: ["data/ukb/250729_ehr_qwen_baseline.feather"]
+
+eid_map_path: "data/ukb/mapping_combined.txt"
+eid_map_from: 'EID.49966'
+eid_map_to: 'EID.51157' # target identifier namespace

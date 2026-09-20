@@ -1,0 +1,15 @@
+defaults:
+ - plugins: default
+ - _self_
+
+splits: data/ukb/REPLACE_WITH_LOCAL_PATH
+train_split: 'train'
+valid_split: 'valid'
+test_split: 'test'
+combine_eids_as: 'union'  # 'intersect' / 'union' 
+num_workers: 4  # 32
+batch_size: 2048  # 256  # 3072  # 512
+pin_memory: true
+drop_last: true
+shuffle: true
+keyerr: true  # true if intersect, false if union

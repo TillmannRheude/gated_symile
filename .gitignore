@@ -1,0 +1,23 @@
+wandb/
+
+outputs
+**/*.out
+**/*.txt
+
+udm
+checkpoints
+visualization
+debug.ipynb
+test
+sweeps
+
+# Keep anonymized review configs tracked; ignore optional machine-local overrides.
+config/local/
+config/*_local.yaml
+
+__pycache__/
+
+test_ckpt
+
+eval
+ukb_audit_reports/

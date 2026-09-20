@@ -1,0 +1,33 @@
+defaults:
+  - _self_
+  - datamodule: default
+  - encoders: ukb  # symile_mimic / ukb / synthetic_xnor
+  - modelname: symile  # clip / symile / triangle / gram
+
+dataset_name: ukb  # symile_mimic / ukb / synthetic_xnor
+batch_size: 32
+split_nr: 1
+devices: 1
+
+optimizer:
+  name: schedulefree_adamw  # 
+  lr: 1e-2
+  lr_gate_mul: 1.0
+  warmup_steps: 100
+  weight_decay: 0.01  # 1e-4
+  eps: 1e-7
+  betas: [0.9, 0.95]
+
+seed: 420
+
+precision: "bf16"
+max_epochs: 25
+patience: 5
+monitor: "val/acc_top1"
+monitor_mode: "max"
+wandb:
+  project: "anonymous_review"
+  group: None
+
+ckpt_dir: "checkpoints"
+ckpt_name: None

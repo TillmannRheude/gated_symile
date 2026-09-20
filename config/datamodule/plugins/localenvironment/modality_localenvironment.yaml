@@ -1,0 +1,9 @@
+name: TabularPlugin
+init: _init_ 
+
+# data_paths: ["data/ukb/113_local_environment.feather"]
+data_paths: ["data/ukb/113_local_environment.feather"]
+
+eid_map_path: "data/ukb/mapping_combined.txt"
+eid_map_from: 'EID.49966' 
+eid_map_to: 'EID.44448' # target identifier namespace

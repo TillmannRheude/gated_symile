@@ -1,0 +1,39 @@
+defaults:
+  - _self_
+
+monitor:
+  metric: "val/acc_top1"
+  mode: "max"
+
+input_dim: 128
+n_samples: 30000
+data_seed: 420
+
+dims_modality: [128, 128, 128]
+
+n_bits: 16
+
+# - xnor_only: A carries only (xor/xnor)(u,v) bits; B carries u; C carries v (original setup).
+# - u_v_uv: A carries [u, v, (xor/xnor)(u,v)] and B/C are structured so that B⊙C = [u, v, (xor/xnor)(u,v)].
+embed_mode: "u_v_uv"
+
+# keep real signal (0.5 kills info completely)
+p_flips: [0.0, 0.0]
+
+# corruption probabilities
+p_corrs: [0.0, 1.0, 1.0]
+
+# use misleading corruption (not gaussian) so ungated gets pulled the wrong way
+corr_modes: "swap_signal"
+
+# Optional: make B/C corruption mutually exclusive (per sample).
+# If enabled and `bc_corr_p` is null, this expects `p_corrs[1] == p_corrs[2]` and uses that value.
+bc_corr_exclusive: true
+bc_corr_p: null
+bc_corr_split: 0.5
+
+# make SNR low so the model can't just ignore corruption implicitly
+signal_scale: 1.0
+distractor_std: 3.0
+
+a_rule: "xnor"
